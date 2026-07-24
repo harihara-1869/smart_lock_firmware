@@ -59,6 +59,7 @@ typedef enum {
     LLI_ERR_NOT_SUPPORTED     = 4,
     LLI_ERR_INVALID_ARG       = 5,
     LLI_ERR_INTERNAL          = 6,
+    LLI_ERR_LINK_RELEASED     = 7,
 } lli_err_t;
 
 typedef struct lli_t *lli_handle_t;

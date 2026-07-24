@@ -100,23 +100,7 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
         goto cleanup_deinit;
     }
 
-    /* Step 4 — SAM configuration (Normal mode, IRQ enabled). */
-    err = pn532_sam_configuration(h->pn532, PN532_SAM_NORMAL, 0, true);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pn532_sam_configuration failed: %s", esp_err_to_name(err));
-        goto cleanup_deinit;
-    }
-
-    /* Step 5 — set communication parameters. */
-    err = pn532_set_parameters(h->pn532,
-                               PN532_PARAM_AUTO_ATR_RES |
-                               PN532_PARAM_ISO14443_4_PICC);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pn532_set_parameters failed: %s", esp_err_to_name(err));
-        goto cleanup_deinit;
-    }
-
-    /* Step 6 — firmware version sanity check. */
+    /* Step 4 — firmware version sanity check (before any configuration). */
     pn532_firmware_version_t fw;
     err = pn532_get_firmware_version(h->pn532, &fw);
     if (err != ESP_OK) {
@@ -131,6 +115,22 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
     }
     ESP_LOGI(TAG, "PN532 v%d.%d (IC=0x%02X, caps=0x%02X)",
              fw.ver, fw.rev, fw.ic, fw.support);
+
+    /* Step 5 — SAM configuration (Normal mode, IRQ enabled). */
+    err = pn532_sam_configuration(h->pn532, PN532_SAM_NORMAL, 0, true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pn532_sam_configuration failed: %s", esp_err_to_name(err));
+        goto cleanup_deinit;
+    }
+
+    /* Step 6 — set communication parameters. */
+    err = pn532_set_parameters(h->pn532,
+                               PN532_PARAM_AUTO_ATR_RES |
+                               PN532_PARAM_ISO14443_4_PICC);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pn532_set_parameters failed: %s", esp_err_to_name(err));
+        goto cleanup_deinit;
+    }
 
     /* Step 7 — cache card identity. */
     memcpy(h->sens_res,    cfg->sens_res,    sizeof(h->sens_res));
@@ -176,6 +176,25 @@ lli_err_t lli_activate(lli_handle_t handle, uint32_t timeout_ms)
         return LLI_ERR_INVALID_ARG;
     }
 
+    /* Check for external RF field before entering card emulation.
+     * GetGeneralStatus (0x04) → response 0x05 + NbTg + Tg[n] + SAM + Field.
+     * Field == 0x01 means an external RF field is already present. */
+    esp_err_t err = pn532_send_command(handle->pn532, 0x04, NULL, 0);
+    if (err == ESP_OK) {
+        uint8_t gs[PN532_MAX_PAYLOAD_LEN];
+        size_t  gs_len = 0;
+        err = pn532_receive_response(handle->pn532,
+                                     gs, sizeof(gs), &gs_len, 500);
+        if (err == ESP_OK && gs_len >= 2 && gs[0] == 0x05) {
+            /* Field byte is the last byte of the response. */
+            uint8_t field = gs[gs_len - 1];
+            if (field == 0x01) {
+                ESP_LOGW(TAG, "external RF field present before activate");
+                return LLI_ERR_INTERNAL;
+            }
+        }
+    }
+
     pn532_tg_init_params_t params = {
         .sens_res    = {handle->sens_res[0], handle->sens_res[1]},
         .nfcid1      = {handle->nfcid1[0], handle->nfcid1[1], handle->nfcid1[2]},
@@ -188,7 +207,9 @@ lli_err_t lli_activate(lli_handle_t handle, uint32_t timeout_ms)
         .gt_len      = handle->gt_len,
         .tk          = (handle->tk_len > 0) ? handle->tk : NULL,
         .tk_len      = handle->tk_len,
-        .mode        = PN532_TG_MODE_PASSIVE_ONLY,
+        /* Mode is fixed to PICC_ONLY — this system performs ISO-DEP card
+         * emulation only. DEP (peer-to-peer) mode is not used. */
+        .mode        = PN532_TG_MODE_PICC_ONLY,
     };
     memcpy(params.nfcid2,      handle->nfcid2,      sizeof(handle->nfcid2));
     memcpy(params.pad,         handle->pad,         sizeof(handle->pad));
@@ -196,8 +217,8 @@ lli_err_t lli_activate(lli_handle_t handle, uint32_t timeout_ms)
     memcpy(params.nfcid3,      handle->nfcid3t,     sizeof(handle->nfcid3t));
 
     pn532_tg_init_result_t result;
-    esp_err_t err = pn532_tg_init_as_target(handle->pn532,
-                                            &params, &result, timeout_ms);
+    err = pn532_tg_init_as_target(handle->pn532,
+                                  &params, &result, timeout_ms);
     if (err == ESP_ERR_TIMEOUT) {
         return LLI_ERR_TIMEOUT;
     }
@@ -226,6 +247,7 @@ lli_err_t lli_receive_apdu(lli_handle_t handle, uint8_t *buf, size_t buf_len,
     esp_err_t err = pn532_send_command(handle->pn532, 0x86, NULL, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TgGetData send failed: %s", esp_err_to_name(err));
+        *len_out = 0;
         return (err == ESP_ERR_TIMEOUT) ? LLI_ERR_TIMEOUT : LLI_ERR_INTERNAL;
     }
 
@@ -234,10 +256,12 @@ lli_err_t lli_receive_apdu(lli_handle_t handle, uint8_t *buf, size_t buf_len,
     err = pn532_receive_response(handle->pn532,
                                  resp, sizeof(resp), &resp_len, timeout_ms);
     if (err == ESP_ERR_TIMEOUT) {
+        *len_out = 0;
         return LLI_ERR_TIMEOUT;
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TgGetData receive failed: %s", esp_err_to_name(err));
+        *len_out = 0;
         return LLI_ERR_FRAME_INTEGRITY;
     }
 
@@ -245,14 +269,20 @@ lli_err_t lli_receive_apdu(lli_handle_t handle, uint8_t *buf, size_t buf_len,
     if (resp_len < 2 || resp[0] != 0x87) {
         ESP_LOGE(TAG, "TgGetData unexpected response code 0x%02X len=%u",
                  resp[0], (unsigned)resp_len);
+        *len_out = 0;
         return LLI_ERR_FRAME_INTEGRITY;
     }
 
     uint8_t status = resp[1];
     if (status != 0x00) {
+        *len_out = 0;
         if (status == 0x01) {
             ESP_LOGW(TAG, "TgGetData status=0x01 (timeout)");
             return LLI_ERR_TIMEOUT;
+        }
+        if (status == 0x29) {
+            ESP_LOGW(TAG, "TgGetData status=0x29 (target released)");
+            return LLI_ERR_LINK_RELEASED;
         }
         ESP_LOGW(TAG, "TgGetData status=0x%02X (frame integrity)", status);
         return LLI_ERR_FRAME_INTEGRITY;
@@ -305,10 +335,10 @@ lli_link_status_t lli_get_link_status(lli_handle_t handle)
 
     switch (status.state) {
     case PN532_TG_STATE_PICC_ACTIVATED:
+    case PN532_TG_STATE_PICC_DESELECTED:
         return LLI_STATUS_ACTIVE;
     case PN532_TG_STATE_PICC_RELEASED:
     case PN532_TG_STATE_IDLE:
-    case PN532_TG_STATE_PICC_DESELECTED:
         return LLI_STATUS_RELEASED;
     default:
         ESP_LOGW(TAG, "unknown target state 0x%02X", status.state);
@@ -329,7 +359,7 @@ lli_err_t lli_abort(lli_handle_t handle)
                  esp_err_to_name(err));
     }
 
-    /* Step 2 — best-effort: release all targets (cmd 0x52, Tg=0x00). */
+    /* Step 2 — best-effort: release all targets (InRelease, Tg=0x00). */
     uint8_t rel_param = 0x00;
     err = pn532_send_command(handle->pn532, 0x52, &rel_param, 1);
     if (err != ESP_OK) {
@@ -346,27 +376,11 @@ lli_err_t lli_abort(lli_handle_t handle)
         }
     }
 
-    /* Step 3 — re-arm: re-issue TgInitAsTarget (non-blocking, short timeout
-     * won't succeed — we just need the PN532 to enter listening mode). */
-    pn532_tg_init_params_t params = {
-        .sens_res    = {handle->sens_res[0], handle->sens_res[1]},
-        .nfcid1      = {handle->nfcid1[0], handle->nfcid1[1], handle->nfcid1[2]},
-        .sel_res     = handle->sel_res,
-        .gt          = (handle->gt_len > 0) ? handle->gt : NULL,
-        .gt_len      = handle->gt_len,
-        .tk          = (handle->tk_len > 0) ? handle->tk : NULL,
-        .tk_len      = handle->tk_len,
-        .mode        = PN532_TG_MODE_PASSIVE_ONLY,
-    };
-    memcpy(params.nfcid2,      handle->nfcid2,      sizeof(handle->nfcid2));
-    memcpy(params.pad,         handle->pad,         sizeof(handle->pad));
-    memcpy(params.system_code, handle->system_code, sizeof(handle->system_code));
-    memcpy(params.nfcid3,      handle->nfcid3t,     sizeof(handle->nfcid3t));
-
-    pn532_tg_init_result_t result;
-    err = pn532_tg_init_as_target(handle->pn532, &params, &result, 0);
+    /* Step 3 — chip may have entered Power Down after release; guarantee
+     * it is awake for the next lli_activate call. */
+    err = pn532_wakeup(handle->pn532);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "TgInitAsTarget re-arm failed: %s (abort completed)",
+        ESP_LOGD(TAG, "pn532_wakeup (best-effort) failed: %s",
                  esp_err_to_name(err));
     }
 
