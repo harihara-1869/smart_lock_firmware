@@ -68,12 +68,12 @@ function cleans up in reverse order and returns `LLI_ERR_INTERNAL`.
 | 2 | `pn532_init` | Bind transport vtable to a new driver handle (no bus traffic) |
 | 3 | `pn532_wakeup` | Send 0x55 burst, wait 2 ms for oscillator start |
 | 4 | `pn532_get_firmware_version` | Validate IC == 0x32; log version/caps |
-| 5 | `pn532_sam_configuration` | SAM Normal mode, IRQ enabled |
-| 6 | `pn532_set_parameters` | Enable `AUTO_ATR_RES` + `ISO14443_4_PICC` |
-| 7 | — | Copy card identity fields from `lli_config_t` into the handle |
+| 5 | `configure_pn532` | SAMConfiguration (Normal, IRQ) + SetParameters (AUTO_ATR_RES, ISO14443_4_PICC) |
+| 6 | — | Copy card identity fields from `lli_config_t` into the handle; validate `gt_len`/`tk_len` |
 
-The firmware check comes before any configuration command so that a wrong chip
-or absent PN532 is caught early.
+Steps 5 is also re-run at the start of every `lli_activate` call to recover
+from silent PN532 hardware resets (the I2C bus recovery path can reset the
+chip without the LLI layer knowing).
 
 ---
 
@@ -81,12 +81,14 @@ or absent PN532 is caught early.
 
 ### `lli_activate`
 
-1. Sends `GetGeneralStatus` (0x04) to check the external RF field flag.  If
-   the field byte is 0x01 a reader's field is already present — the function
-   returns `LLI_ERR_INTERNAL` without entering card-emulation mode.
-2. Builds a `pn532_tg_init_params_t` from the cached card identity.  Mode is
-   fixed to `PN532_TG_MODE_PICC_ONLY` (ISO-DEP card emulation only, no DEP).
-3. Calls `pn532_tg_init_as_target`.  This blocks until an NFC reader
+1. Re-applies the PN532 configuration (`configure_pn532` — SAMConfiguration +
+   SetParameters) to recover from any silent hardware resets that may have
+   occurred since `lli_init`.
+2. Validates `gt_len`/`tk_len` are within the 47-byte limit.
+3. Builds a `pn532_tg_init_params_t` from the cached card identity.  Mode is
+   `PN532_TG_MODE_PICC_ONLY | PN532_TG_MODE_PASSIVE_ONLY` (ISO-DEP card
+   emulation only, passive activation only, no DEP).
+4. Calls `pn532_tg_init_as_target`.  This blocks until an NFC reader
    activates the PN532 or the timeout elapses.
 
 Error mapping:
@@ -223,7 +225,8 @@ does not need to keep the struct alive after init returns.
 | `scl_gpio` | `int` | I2C SCL pin |
 | `irq_gpio` | `int` | PN532 IRQ pin; `-1` for polling mode |
 | `rst_gpio` | `int` | PN532 RST pin; `-1` if not wired |
-| `i2c_port` | `int` | I2C port number (e.g. `I2C_NUM_0`) |
+| `i2c_port` | `i2c_port_t` | I2C port number (e.g. `I2C_NUM_0`) |
+| `i2c_clk_hz` | `uint32_t` | I2C clock speed; `0` = driver default (400 kHz) |
 | `sens_res[2]` | `uint8_t` | ATQA, LSB first |
 | `nfcid1[3]` | `uint8_t` | 3-byte NFCID1 (single-size UID) |
 | `sel_res` | `uint8_t` | SAK byte (`0x20` = ISO14443-4) |

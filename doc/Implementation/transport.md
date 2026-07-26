@@ -69,7 +69,7 @@ Defined internally in `transport.c`, not exposed in the header:
 | `0x10` | `CMD_HANDSHAKE_INIT` | ACTIVATED (M1) |
 | `0x11` | `CMD_HANDSHAKE_FINISH` | HANDSHAKE (M3) |
 | `0x20` | `CMD_SECURE_PAYLOAD` | SECURE_SESSION |
-| `0x30` | `CMD_SESSION_ABORT` | HANDSHAKE, SECURE_SESSION |
+| `0x30` | `CMD_SESSION_ABORT` | ACTIVATED, HANDSHAKE, SECURE_SESSION |
 
 ---
 
@@ -151,7 +151,10 @@ call `transport_run_session` again.
 Receives one C-APDU.  If the receive fails for any reason (timeout, link lost,
 frame error), invokes the erase callback and transitions to RELEASED.
 
-Parses the C-APDU.  If INS is not `0x10` (HANDSHAKE_INIT), sends SW=0x69 0x85
+Parses the C-APDU.  If INS is `0x30` (SESSION_ABORT), invokes the erase
+callback, sends SW=0x90 0x00 (best-effort), and transitions to RELEASED.
+
+If INS is not `0x10` (HANDSHAKE_INIT) and not `0x30`, sends SW=0x69 0x85
 and stays in ACTIVATED — the reader may retry.
 
 Passes the valid M1 to the `on_apdu` callback.  The application fills the
