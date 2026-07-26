@@ -18,6 +18,7 @@
 
 #include "session.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -262,6 +263,9 @@ static transport_err_t session_handle_secure_payload(
     if (capdu->lc < SESSION_GCM_OVERHEAD) {
         return TRANSPORT_ERR_INVALID_APDU;
     }
+    /* Transport owns the protocol budget check; this is only the required
+     * debug-build invariant for the byte-sized C-APDU length field. */
+    assert(capdu->lc <= 255);
 
     /* Wire format: nonce(12) ‖ ciphertext ‖ tag(16). */
     const uint8_t *nonce = capdu->data;

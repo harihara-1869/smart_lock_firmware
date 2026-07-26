@@ -13,13 +13,13 @@ AAI/lock actuation) is an external peer and is out of scope for this document.
 | PN532 Command Layer | Built | `command-layer.md`, `api-reference.md` |
 | LLI | Built | `lli.md` |
 | Transport | Built | `transport.md` |
-| Session | **Not yet built** — designed below | Session Layer spec v0.4 |
-| Comm Module Facade | **Not yet built** — designed below | — |
+| Session | Built | Session Module, Part I |
+| Comm Module Facade | Built | Communication Module specification |
 
-A companion document, **`communication_module_required_changes.md`**, lists
-every concrete fix needed in the five built layers before Session can be
-wired on top. Read that alongside this one — this document describes the
-target end-state, the other describes the delta from what exists today.
+The consolidated specification and **`SPEC_COMPLIANCE.md`** are the
+authoritative sources for protocol requirements and review deltas. The current
+repository includes the Session layer and communication facade described
+below; the Application Module remains a collaborating peer.
 
 ---
 
@@ -76,8 +76,8 @@ target end-state, the other describes the delta from what exists today.
 **Rule that must hold at every seam:** a layer only calls the API of the
 layer immediately beneath it. Session never calls `lli_*` or `pn532_*`
 directly; Transport never calls `pn532_*` directly; the Application never
-includes anything but `comm_module.h`. This is already true of the five
-built layers and must stay true when Session and the facade are added.
+includes anything but `comm_module.h`. This invariant holds in the current
+implementation.
 
 ---
 
@@ -272,10 +272,10 @@ Link-status mapping (`lli_get_link_status`):
 `lli_abort`: ACK → `InRelease(Tg=0x00)` → `pn532_wakeup`, best-effort,
 always returns `LLI_OK`.
 
-**This layer needs several concrete fixes before it's Session-ready** — see
-`communication_module_required_changes.md` §1–§5. None of them change the
-five function signatures above; they change internal behavior only, so
-nothing above LLI (Transport, Session) needs to know they happened.
+The implementation applies the conformance requirements: typed I2C
+configuration with clock plumbing, fail-fast 47-byte `gt`/`tk` validation,
+per-activation PN532 configuration, passive PICC-only activation, and the
+documented single-frame 261/262-byte receive assumption.
 
 ---
 
@@ -303,8 +303,13 @@ typedef struct {
 
 typedef struct {
     uint8_t data[256];
-    uint8_t len, sw1, sw2;
+    uint16_t len;
+    uint8_t sw1, sw2;
 } transport_rapdu_t;
+
+Callback-produced responses are serialized as `Data || SW1 || SW2`; the
+maximum short R-APDU is therefore 258 bytes. Status-only error responses send
+the two status bytes directly.
 
 typedef transport_err_t (*transport_apdu_handler_t)(
     const transport_capdu_t *capdu, transport_rapdu_t *rapdu, void *user_ctx);
@@ -335,9 +340,9 @@ APDUs that are legal to receive in the current state (per §5.1's table);
 Session's implementation of `on_apdu` just switches on `capdu->ins`
 internally (0x10 → build M2, 0x11 → verify M3, 0x20 → decrypt/dispatch/
 encrypt) and returns `TRANSPORT_OK` / an error exactly as documented in
-`transport.md`. **This means Transport needs no API changes for Session to
-be wired in** — only the one state-machine bug in
-`communication_module_required_changes.md` §6.
+`transport.md`. Session uses this callback contract without adapter hooks.
+The facade adds explicit Transport liveness and abort entry points for its
+public API; those are separate from Session’s callback integration.
 
 `on_erase` is invoked before every RELEASED transition, exactly once per
 teardown path, per the secure-erase invariant already documented in
@@ -348,7 +353,7 @@ no-op), HANDSHAKE (ephemeral keys exist — wipe them), or SECURE_SESSION
 
 ---
 
-## 7. Session — design (not yet built)
+## 7. Session — implementation
 
 `session.h/.c` implements exactly two function pointers that plug directly
 into `transport_config_t` with **no adapter shim**:
@@ -522,7 +527,7 @@ Idempotent — safe to call on a session that never got past ACTIVATED.
 
 ---
 
-## 8. Comm Module Facade — design (not yet built)
+## 8. Comm Module Facade — implementation
 
 `comm_module.h` — the only header the Application Module includes. Wires
 Session + Transport + LLI + drivers behind one config struct and re-exports
@@ -582,14 +587,41 @@ comm_err_t comm_module_force_abort(comm_module_handle_t h);
 the five lower layers to change.
 
 `comm_module_is_session_active` is what the Application spec's §5.2 step 2
-needs — "confirm session still active immediately before actuation." It's a
-thin call to `transport_get_state(h) == TRANSPORT_STATE_SECURE_SESSION`
-combined with a fresh `lli_get_link_status` check, so it reflects RF-loss
-promptly rather than trusting stale state.
+needs — "confirm session still active immediately before actuation." It
+requires both `TRANSPORT_STATE_SECURE_SESSION` and a fresh LLI active-link
+result. This keeps RF-loss detection inside the communication stack without
+exposing LLI internals to the Application.
 
 ---
 
-## 9. End-to-End Call Chain (one full session)
+## 9. Application Module peer contract
+
+The consolidated specification defines the Application Module as an equal-
+standing peer of Session, not as another transport stack layer. The firmware
+currently provides the `app_handler` seam and a boot-time stub, but does not
+yet implement the production Application Module or actuator driver.
+
+The authoritative plaintext envelope is `OPCODE || ARGS`, with these commands:
+
+| Opcode | Command | Arguments |
+|---|---|---|
+| `0x01` | Unlock | none |
+| `0x02` | Lock | none |
+| `0x03` | Status | none |
+
+Unknown opcodes return `APP_STATUS_UNKNOWN_CMD` (`0x01`) and never reach the
+actuator. Authentication currently implies authorization. A conforming
+Application implementation must use an Actuator Abstraction Interface with
+Engage, Disengage, and GetState operations, check communication liveness
+immediately before state-changing actuation, and return `APP_STATUS_OK`
+(`0x00`) or `APP_STATUS_ACTUATOR_FAULT` (`0x02`) as encrypted plaintext.
+
+ACLs/roles, OTA dispatch, and BLE command sources remain explicitly deferred
+by the consolidated specification.
+
+---
+
+## 10. End-to-End Call Chain (one full session)
 
 ```
 Application:  comm_module_register... (done once at boot)
@@ -604,7 +636,7 @@ Application:  comm_module_run_once(h)
     transport  → lli_receive_apdu(...) → C-APDU (INS=0x10, M1)
     transport  → validates INS==0x10 in ACTIVATED → calls on_apdu (session_on_apdu)
       session  → session_handle_m1(...) → builds M2, returns TRANSPORT_OK
-    transport  → lli_send_apdu(M2) → state = HANDSHAKE, THS timer starts
+    transport  → lli_send_apdu(M2 || 0x90 0x00) → state = HANDSHAKE, THS timer starts
     transport  → lli_receive_apdu(...) → C-APDU (INS=0x11, M3)
     transport  → validates INS==0x11 in HANDSHAKE → calls on_apdu
       session  → session_handle_m3(...) → resolver loop, verify, derive keys
@@ -614,10 +646,10 @@ Application:  comm_module_run_once(h)
       transport → calls on_apdu
         session → session_handle_secure_payload(...)
           session → AES-GCM decrypt → app_handler(plaintext) → AES-GCM encrypt
-      transport → lli_send_apdu(encrypted R-APDU)
+      transport → lli_send_apdu(encrypted R-APDU || 0x90 0x00)
     [reader sends CMD_SESSION_ABORT, or link drops, or THS expires]
     transport  → on_erase (session_on_erase) → state = RELEASED
-    transport  → lli_abort(lli_h) → state = IDLE
+    transport  → transport_abort() → session erase → lli_abort(lli_h) → state = IDLE
   comm_module ← TRANSPORT_OK
 Application:  loop back to comm_module_run_once (or use run_forever)
 ```

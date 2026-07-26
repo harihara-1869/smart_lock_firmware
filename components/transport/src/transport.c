@@ -113,6 +113,29 @@ static transport_err_t send_status(transport_handle_t h,
     return TRANSPORT_OK;
 }
 
+/* Send a callback-produced R-APDU as Data || SW1 || SW2. */
+static transport_err_t send_rapdu(transport_handle_t h,
+                                  const transport_rapdu_t *rapdu,
+                                  uint32_t timeout_ms)
+{
+    if (!rapdu || rapdu->len > sizeof(rapdu->data)) {
+        return TRANSPORT_ERR_INTERNAL;
+    }
+
+    uint8_t buf[sizeof(rapdu->data) + 2];
+    size_t len = rapdu->len;
+    memcpy(buf, rapdu->data, len);
+    buf[len++] = rapdu->sw1;
+    buf[len++] = rapdu->sw2;
+
+    lli_err_t err = lli_send_apdu(h->lli, buf, len, timeout_ms);
+    if (err != LLI_OK) {
+        ESP_LOGE(TAG, "send_rapdu failed: %d", err);
+        return TRANSPORT_ERR_INTERNAL;
+    }
+    return TRANSPORT_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
@@ -224,9 +247,8 @@ static transport_err_t run_activated(transport_handle_t h)
         return TRANSPORT_OK;
     }
 
-    err = lli_send_apdu(h->lli, rapdu.data, rapdu.len, h->cfg.apdu_timeout_ms);
-    if (err != LLI_OK) {
-        ESP_LOGE(TAG, "send M2 failed: %d", err);
+    if (send_rapdu(h, &rapdu, h->cfg.apdu_timeout_ms) != TRANSPORT_OK) {
+        ESP_LOGE(TAG, "send M2 failed");
         invoke_erase(h);
         h->state = TRANSPORT_STATE_RELEASED;
         return TRANSPORT_OK;
@@ -312,7 +334,11 @@ static transport_err_t run_handshake(transport_handle_t h)
             return TRANSPORT_OK;
         }
 
-        send_status(h, SW1_OK, SW2_OK, h->cfg.apdu_timeout_ms);
+        if (send_rapdu(h, &rapdu, h->cfg.apdu_timeout_ms) != TRANSPORT_OK) {
+            invoke_erase(h);
+            h->state = TRANSPORT_STATE_RELEASED;
+            return TRANSPORT_OK;
+        }
         h->state = TRANSPORT_STATE_SECURE_SESSION;
         return TRANSPORT_OK;
     }
@@ -380,10 +406,8 @@ static transport_err_t run_secure_session(transport_handle_t h)
             return TRANSPORT_OK;
         }
 
-        err = lli_send_apdu(h->lli, rapdu.data, rapdu.len,
-                            h->cfg.apdu_timeout_ms);
-        if (err != LLI_OK) {
-            ESP_LOGE(TAG, "secure send failed: %d", err);
+        if (send_rapdu(h, &rapdu, h->cfg.apdu_timeout_ms) != TRANSPORT_OK) {
+            ESP_LOGE(TAG, "secure send failed");
             invoke_erase(h);
             h->state = TRANSPORT_STATE_RELEASED;
             return TRANSPORT_OK;
@@ -443,4 +467,30 @@ transport_err_t transport_run_session(transport_handle_t handle)
             return TRANSPORT_OK;
         }
     }
+}
+
+transport_err_t transport_abort(transport_handle_t handle)
+{
+    if (!handle) {
+        return TRANSPORT_ERR_INVALID_APDU;
+    }
+
+    if (handle->state != TRANSPORT_STATE_IDLE &&
+        handle->state != TRANSPORT_STATE_RELEASED) {
+        invoke_erase(handle);
+    }
+    if (lli_abort(handle->lli) != LLI_OK) {
+        handle->state = TRANSPORT_STATE_RELEASED;
+        return TRANSPORT_ERR_INTERNAL;
+    }
+    handle->state = TRANSPORT_STATE_IDLE;
+    return TRANSPORT_OK;
+}
+
+bool transport_is_session_active(transport_handle_t handle)
+{
+    if (!handle || handle->state != TRANSPORT_STATE_SECURE_SESSION) {
+        return false;
+    }
+    return lli_get_link_status(handle->lli) == LLI_STATUS_ACTIVE;
 }

@@ -313,9 +313,13 @@ void app_main(void)
 | Field | Type | Description |
 |-------|------|-------------|
 | `data[256]` | `uint8_t` | Response data |
-| `len` | `uint8_t` | Response data length |
+| `len` | `uint16_t` | Response data length (0–256) |
 | `sw1` | `uint8_t` | Status word high byte |
 | `sw2` | `uint8_t` | Status word low byte |
+
+Callback-produced responses are serialized on the wire as `Data || SW1 || SW2`,
+so the maximum short R-APDU is 258 bytes. Status-only error paths send the two
+status bytes directly.
 
 #### `transport_apdu_handler_t`
 

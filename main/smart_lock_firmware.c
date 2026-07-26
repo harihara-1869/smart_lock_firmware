@@ -22,9 +22,33 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "comm_module.h"
 #include "lli.h"
 
 static const char *TAG = "TEST";
+
+static bool no_provisioned_peer(size_t index, uint8_t pubkey_out[32],
+                                void *ctx)
+{
+    (void)index;
+    (void)pubkey_out;
+    (void)ctx;
+    return false;
+}
+
+static session_err_t application_stub(const uint8_t *plaintext_in,
+                                      size_t len_in,
+                                      uint8_t *plaintext_out,
+                                      size_t *len_out,
+                                      void *app_ctx)
+{
+    (void)plaintext_in;
+    (void)len_in;
+    (void)plaintext_out;
+    (void)app_ctx;
+    *len_out = 0;
+    return SESSION_OK;
+}
 
 /* ── Hardware pin mapping (adjust to your board) ─────────────────── */
 #define TEST_SDA_GPIO   8
@@ -33,6 +57,9 @@ static const char *TAG = "TEST";
 #define TEST_RST_GPIO   11
 #define TEST_I2C_PORT   0
 
+/* The former standalone LLI smoke-test helpers remain below for reference.
+ * The firmware entrypoint now exercises the communication facade. */
+#if 0
 /* ── Card identity presented to readers ──────────────────────────── */
 static const lli_config_t test_cfg = {
     .sda_gpio  = TEST_SDA_GPIO,
@@ -241,10 +268,47 @@ static void test_deinit(lli_handle_t h)
     TEST_ASSERT(err == LLI_OK, "deinit returns LLI_OK");
 }
 
+#endif
+
 /* ── Entry point ─────────────────────────────────────────────────── */
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "=== communication module ===");
+
+    comm_module_config_t cfg = {
+        .sda_gpio = TEST_SDA_GPIO,
+        .scl_gpio = TEST_SCL_GPIO,
+        .irq_gpio = TEST_IRQ_GPIO,
+        .rst_gpio = TEST_RST_GPIO,
+        .i2c_port = TEST_I2C_PORT,
+        .sens_res = {0x04, 0x00},
+        .nfcid1 = {0x01, 0x02, 0x03},
+        .sel_res = 0x20,
+        .nfcid2 = {0x01, 0xFE, 0xA5, 0x01, 0x02, 0x03, 0x04, 0x05},
+        .system_code = {0x88, 0xB4},
+        .nfcid3t = {0x01, 0x02, 0x03, 0x04, 0x05,
+                    0x06, 0x07, 0x08, 0x09, 0x0A},
+        .peer_key_provider = no_provisioned_peer,
+        .app_handler = application_stub,
+    };
+
+    comm_module_handle_t comm = NULL;
+    if (comm_module_init(&cfg, &comm) != COMM_OK) {
+        ESP_LOGE(TAG, "communication module init failed");
+        return;
+    }
+
+    ESP_LOGI(TAG, "communication module ready; Application handler is a stub");
+    for (;;) {
+        comm_err_t comm_err = comm_module_run_once(comm);
+        if (comm_err != COMM_OK && comm_err != COMM_ERR_TIMEOUT) {
+            ESP_LOGE(TAG, "communication session failed: %d", comm_err);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+#if 0
     ESP_LOGI(TAG, "=== LLI test suite ===");
 
     /* ---- init ---------------------------------------------------- */
@@ -289,4 +353,5 @@ void app_main(void)
 
     /* ---- summary ------------------------------------------------- */
     ESP_LOGI(TAG, "=== Results: %d/%d passed ===", tests_passed, tests_run);
+#endif
 }

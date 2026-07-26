@@ -77,6 +77,7 @@ smart_lock_firmware/
 │       ├── smartlock_session_layer.pdf
 │       └── smartlock_transport_layer.pdf
 ├── components/
+│   ├── comm_module/                   # Application-facing communication facade
 │   ├── pn532/                         # PN532 NFC driver
 │   │   ├── include/
 │   │   │   ├── pn532.h                # Core driver API (transport-agnostic)
@@ -177,8 +178,8 @@ usage example so you can use a single layer without the rest of the stack.
 - [x] Transport layer (mutual auth state machine, C-APDU parsing, secure session)
 - [x] Session layer (X25519 + Ed25519 handshake, HKDF key derivation, AES-256-GCM secure channel)
 - [x] Mutual authentication protocol specification
-- [ ] Communication module facade (wires Session + Transport + LLI + drivers behind one API)
-- [ ] Application module (command dispatch, authorization, lock actuation)
+- [x] Communication module facade (wires Session + Transport + LLI + drivers behind one API)
+- [ ] Application module (command dispatch, authorization, lock actuation; protocol specification pending)
 
 ## Future Plans
 

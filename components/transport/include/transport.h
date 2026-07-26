@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -56,7 +57,7 @@ typedef struct {
 
 typedef struct {
     uint8_t data[256];
-    uint8_t len;
+    uint16_t len;
     uint8_t sw1;
     uint8_t sw2;
 } transport_rapdu_t;
@@ -86,6 +87,12 @@ transport_err_t transport_init(const transport_config_t *cfg,
 transport_err_t transport_deinit(transport_handle_t handle);
 
 transport_err_t transport_run_session(transport_handle_t handle);
+
+/** Abort the current exchange, erase session state, and release the link. */
+transport_err_t transport_abort(transport_handle_t handle);
+
+/** Return true only while an authenticated session has an active RF link. */
+bool transport_is_session_active(transport_handle_t handle);
 
 transport_state_t transport_get_state(transport_handle_t handle);
 
