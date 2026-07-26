@@ -48,12 +48,47 @@ struct lli_t {
 };
 
 /* ------------------------------------------------------------------ */
+/* Internal helpers                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief Apply the PN532 configuration required for ISO-DEP card emulation.
+ *
+ * Safe to call repeatedly (idempotent). Re-applies configuration to recover
+ * from silent PN532 hardware resets that the LLI layer cannot detect.
+ */
+static lli_err_t configure_pn532(struct lli_t *h)
+{
+    /* SAM configuration — Normal mode, IRQ enabled. */
+    esp_err_t err = pn532_sam_configuration(h->pn532, PN532_SAM_NORMAL, 0, true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pn532_sam_configuration failed: %s", esp_err_to_name(err));
+        return LLI_ERR_INTERNAL;
+    }
+
+    /* Communication parameters — auto ATR_RES + ISO14443-4 PICC mode. */
+    err = pn532_set_parameters(h->pn532,
+                               PN532_PARAM_AUTO_ATR_RES |
+                               PN532_PARAM_ISO14443_4_PICC);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pn532_set_parameters failed: %s", esp_err_to_name(err));
+        return LLI_ERR_INTERNAL;
+    }
+
+    return LLI_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /* public API                                                          */
 /* ------------------------------------------------------------------ */
 
 lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
 {
     if (!cfg || !handle_out) {
+        return LLI_ERR_INVALID_ARG;
+    }
+
+    if (cfg->gt_len > 47 || cfg->tk_len > 47) {
         return LLI_ERR_INVALID_ARG;
     }
 
@@ -68,8 +103,8 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
         .scl_gpio  = cfg->scl_gpio,
         .irq_gpio  = cfg->irq_gpio,
         .rst_gpio  = cfg->rst_gpio,
-        .port      = (i2c_port_t)cfg->i2c_port,
-        .clk_speed = PN532_I2C_DEFAULT_CLK_HZ,
+        .port      = cfg->i2c_port,
+        .clk_speed = cfg->i2c_clk_hz,
     };
 
     esp_err_t err = pn532_i2c_create(&i2c_cfg, &h->ops, &h->i2c_ctx);
@@ -116,19 +151,9 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
     ESP_LOGI(TAG, "PN532 v%d.%d (IC=0x%02X, caps=0x%02X)",
              fw.ver, fw.rev, fw.ic, fw.support);
 
-    /* Step 5 — SAM configuration (Normal mode, IRQ enabled). */
-    err = pn532_sam_configuration(h->pn532, PN532_SAM_NORMAL, 0, true);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pn532_sam_configuration failed: %s", esp_err_to_name(err));
-        goto cleanup_deinit;
-    }
-
-    /* Step 6 — set communication parameters. */
-    err = pn532_set_parameters(h->pn532,
-                               PN532_PARAM_AUTO_ATR_RES |
-                               PN532_PARAM_ISO14443_4_PICC);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pn532_set_parameters failed: %s", esp_err_to_name(err));
+    /* Step 5 + 6 — configure PN532 for ISO-DEP card emulation. */
+    err = configure_pn532(h);
+    if (err != LLI_OK) {
         goto cleanup_deinit;
     }
 
@@ -176,23 +201,10 @@ lli_err_t lli_activate(lli_handle_t handle, uint32_t timeout_ms)
         return LLI_ERR_INVALID_ARG;
     }
 
-    /* Check for external RF field before entering card emulation.
-     * GetGeneralStatus (0x04) → response 0x05 + NbTg + Tg[n] + SAM + Field.
-     * Field == 0x01 means an external RF field is already present. */
-    esp_err_t err = pn532_send_command(handle->pn532, 0x04, NULL, 0);
-    if (err == ESP_OK) {
-        uint8_t gs[PN532_MAX_PAYLOAD_LEN];
-        size_t  gs_len = 0;
-        err = pn532_receive_response(handle->pn532,
-                                     gs, sizeof(gs), &gs_len, 500);
-        if (err == ESP_OK && gs_len >= 2 && gs[0] == 0x05) {
-            /* Field byte is the last byte of the response. */
-            uint8_t field = gs[gs_len - 1];
-            if (field == 0x01) {
-                ESP_LOGW(TAG, "external RF field present before activate");
-                return LLI_ERR_INTERNAL;
-            }
-        }
+    /* Re-apply PN532 configuration in case it was silently reset. */
+    lli_err_t err = configure_pn532(handle);
+    if (err != LLI_OK) {
+        return err;
     }
 
     pn532_tg_init_params_t params = {
@@ -207,9 +219,9 @@ lli_err_t lli_activate(lli_handle_t handle, uint32_t timeout_ms)
         .gt_len      = handle->gt_len,
         .tk          = (handle->tk_len > 0) ? handle->tk : NULL,
         .tk_len      = handle->tk_len,
-        /* Mode is fixed to PICC_ONLY — this system performs ISO-DEP card
-         * emulation only. DEP (peer-to-peer) mode is not used. */
-        .mode        = PN532_TG_MODE_PICC_ONLY,
+        /* Passive PICC only — reject active-mode DEP at the PN532 level. */
+        .mode        = PN532_TG_MODE_PICC_ONLY |
+                       PN532_TG_MODE_PASSIVE_ONLY,
     };
     memcpy(params.nfcid2,      handle->nfcid2,      sizeof(handle->nfcid2));
     memcpy(params.pad,         handle->pad,         sizeof(handle->pad));
@@ -217,14 +229,14 @@ lli_err_t lli_activate(lli_handle_t handle, uint32_t timeout_ms)
     memcpy(params.nfcid3,      handle->nfcid3t,     sizeof(handle->nfcid3t));
 
     pn532_tg_init_result_t result;
-    err = pn532_tg_init_as_target(handle->pn532,
-                                  &params, &result, timeout_ms);
-    if (err == ESP_ERR_TIMEOUT) {
+    esp_err_t pn532_err = pn532_tg_init_as_target(handle->pn532,
+                                                   &params, &result, timeout_ms);
+    if (pn532_err == ESP_ERR_TIMEOUT) {
         return LLI_ERR_TIMEOUT;
     }
-    if (err != ESP_OK) {
+    if (pn532_err != ESP_OK) {
         ESP_LOGE(TAG, "pn532_tg_init_as_target failed: %s",
-                 esp_err_to_name(err));
+                 esp_err_to_name(pn532_err));
         return LLI_ERR_INTERNAL;
     }
 
@@ -243,6 +255,11 @@ lli_err_t lli_receive_apdu(lli_handle_t handle, uint8_t *buf, size_t buf_len,
      * directly. pn532_tg_get_data() abstracts it away.
      *
      * Command 0x86 (TgGetData) → response 0x87 + status + data.
+     *
+     * No MI-bit (More Information) fragment reassembly: the current protocol
+     * guarantees every Short APDU (max 261 bytes) fits in one PN532 frame
+     * (262-byte payload). Revisit if the protocol adds application-layer
+     * chaining or increases the maximum APDU size.
      */
     esp_err_t err = pn532_send_command(handle->pn532, 0x86, NULL, 0);
     if (err != ESP_OK) {

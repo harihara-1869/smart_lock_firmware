@@ -21,6 +21,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "driver/i2c_types.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,7 +32,8 @@ typedef struct {
     int scl_gpio;
     int irq_gpio;       // -1 if not used
     int rst_gpio;       // -1 if not used
-    int i2c_port;       // e.g. I2C_NUM_0
+    i2c_port_t i2c_port;       // e.g. I2C_NUM_0
+    uint32_t i2c_clk_hz;       // 0 = default 400 kHz
 
     uint8_t sens_res[2];
     uint8_t nfcid1[3];

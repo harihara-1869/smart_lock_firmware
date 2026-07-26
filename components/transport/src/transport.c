@@ -183,6 +183,13 @@ static transport_err_t run_activated(transport_handle_t h)
         return TRANSPORT_OK;
     }
 
+    if (capdu.ins == INS_SESSION_ABORT) {
+        invoke_erase(h);
+        send_status(h, SW1_OK, SW2_OK, h->cfg.apdu_timeout_ms);
+        h->state = TRANSPORT_STATE_RELEASED;
+        return TRANSPORT_OK;
+    }
+
     if (capdu.ins != INS_HANDSHAKE_INIT) {
         ESP_LOGW(TAG, "unexpected INS 0x%02X in ACTIVATED", capdu.ins);
         send_status(h, SW1_SECURITY, SW2_WRONG_STATE, h->cfg.apdu_timeout_ms);
