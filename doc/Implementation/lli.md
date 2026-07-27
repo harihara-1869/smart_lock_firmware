@@ -123,8 +123,12 @@ Status byte mapping:
 | Anything else | `LLI_ERR_FRAME_INTEGRITY` | No |
 
 On any non-OK return, `*len_out` is zeroed before the function returns.  The
-PN532 handles MI-bit chaining internally — the LLI receives the fully
-reassembled payload.
+LLI intentionally bypasses the high-level `pn532_tg_get_data` wrapper because
+it needs the raw PN532 status byte.  MI-bit reassembly is implemented in the
+ESP32-side `pn532_cmd.c` wrapper, not in PN532 firmware; the current raw path
+is still safe because the protocol's maximum C-APDU is 261 bytes, while one
+`TgGetData` response carries 262 bytes, so chaining cannot occur under the
+current protocol limits.
 
 ### `lli_send_apdu`
 

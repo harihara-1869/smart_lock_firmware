@@ -54,6 +54,7 @@ static const char *TAG = "SESSION";
 #define SESSION_PLAINTEXT_MAX (255 - SESSION_GCM_OVERHEAD)      /* 227    */
 
 #define SESSION_HKDF_SALT_LEN  64   /* c_P(32) ‖ c_L(32) */
+#define SESSION_MAX_PEER_CANDIDATES 64
 
 typedef enum {
     SESSION_STAGE_EMPTY = 0,   /* no key material (post-init / post-erase) */
@@ -182,7 +183,7 @@ static transport_err_t session_handle_m3(session_handle_t h,
      * accept the first one that verifies Sig_P against the transcript. */
     uint8_t candidate[SESSION_CRYPTO_ED25519_PK_LEN];
     bool authenticated = false;
-    for (size_t i = 0; ; i++) {
+    for (size_t i = 0; i < SESSION_MAX_PEER_CANDIDATES; i++) {
         if (!h->cfg.peer_key_provider(i, candidate,
                                       h->cfg.peer_key_provider_ctx)) {
             break;

@@ -4,7 +4,7 @@
 → Transport → Session. The Application Module (command dispatch, authorization,
 AAI/lock actuation) is an external peer and is out of scope for this document.
 
-**Status of each layer**, per current implementation:
+**Status of each layer**, per the current implementation:
 
 | Layer | Status | Source docs |
 |---|---|---|
@@ -13,13 +13,13 @@ AAI/lock actuation) is an external peer and is out of scope for this document.
 | PN532 Command Layer | Built | `command-layer.md`, `api-reference.md` |
 | LLI | Built | `lli.md` |
 | Transport | Built | `transport.md` |
-| Session | **Not yet built** — designed below | Session Layer spec v0.4 |
+| Session | Built | `session.md` |
 | Comm Module Facade | **Not yet built** — designed below | — |
 
-A companion document, **`communication_module_required_changes.md`**, lists
-every concrete fix needed in the five built layers before Session can be
-wired on top. Read that alongside this one — this document describes the
-target end-state, the other describes the delta from what exists today.
+The current repository builds the PN532, LLI, Transport, and Session layers,
+but does not yet provide the planned facade or Application Module.  The
+firmware entry point is currently an LLI hardware test harness in
+`main/smart_lock_firmware.c`; it does not wire Session into Transport.
 
 ---
 
@@ -34,15 +34,14 @@ target end-state, the other describes the delta from what exists today.
 ┌───────────────────────────────┴───────────────────────────────────┐
 │                     COMMUNICATION MODULE                           │
 │                                                                     │
-│  comm_module.h  ◄── the ONLY header the Application includes       │
+│  comm_module.h  ◄── planned facade; not yet implemented            │
 │       │                                                             │
 │  ┌────┴─────────────────────────────────────────────────────┐     │
 │  │ Session (session.h/.c)                                    │     │
 │  │   identity, 3-message handshake, HKDF, AES-256-GCM,        │     │
 │  │   peer-key resolution, secure erase                        │     │
 │  │   implements: transport_apdu_handler_t, transport_erase_   │     │
-│  │   handler_t  — registers into Transport, no Transport       │     │
-│  │   changes needed                                            │     │
+│  │   handler_t  — registers into Transport                       │     │
 │  └────┬─────────────────────────────────────────────────────┘     │
 │       │ transport_capdu_t / transport_rapdu_t (opaque to Session   │
 │       │ w.r.t. framing, but Session reads/writes their fields)     │
@@ -75,9 +74,10 @@ target end-state, the other describes the delta from what exists today.
 
 **Rule that must hold at every seam:** a layer only calls the API of the
 layer immediately beneath it. Session never calls `lli_*` or `pn532_*`
-directly; Transport never calls `pn532_*` directly; the Application never
-includes anything but `comm_module.h`. This is already true of the five
-built layers and must stay true when Session and the facade are added.
+directly; Transport never calls `pn532_*` directly. The planned facade will
+be the only header exposed to the Application Module. This boundary is
+already true of the implemented layers and must be preserved when the
+facade is added.
 
 ---
 
@@ -107,10 +107,10 @@ typedef struct {
 
 Key behaviors to remember when anything above it misbehaves:
 
-- **Bus recovery is silent and automatic.** After 5 failed write retries,
+- **Bus recovery is automatic.** After 5 failed write retries,
   `pn532_i2c_write` calls `recover_i2c_bus()` and, if `rst_gpio` is wired,
-  a full `pn532_i2c_reset_device()`. Nothing above this layer is told this
-  happened. See required-changes doc §1 for why this matters to LLI.
+  a full `pn532_i2c_reset_device()`. Higher layers observe only the result of
+  the operation and may reapply PN532 configuration on the next activation.
 - IRQ mode and polling mode are both supported and selected purely by
   `irq_gpio >= 0`; nothing above the I2C layer needs to know which is active.
 - `scl_wait_us = 50000` tolerates PN532 clock-stretching without any
@@ -157,8 +157,7 @@ esp_err_t pn532_send_ack(pn532_handle_t h);
 
 `pn532_send_command` + `pn532_receive_response` is the pair LLI's
 `lli_receive_apdu` uses **directly**, bypassing the command layer's
-`pn532_tg_get_data` — see §5 for why, and the required-changes doc for the
-one consequence of that choice worth documenting explicitly.
+`pn532_tg_get_data` — see §5 for why.
 
 CRC-error handling (`resync_frame`) and reset are transparent below this
 layer's callers; nothing above needs new logic to benefit from them.
@@ -203,9 +202,11 @@ vs. anything-else) to satisfy the Hardware/Link-Layer spec's error taxonomy,
 so it does **not** call `pn532_tg_get_data` — it drives
 `pn532_send_command(h, 0x86, NULL, 0)` +
 `pn532_receive_response(h, buf, cap, &len, timeout)` itself and reads
-`buf[1]` directly. This is intentional and correct; it does mean LLI does
-not get the command layer's MI-bit chaining for free (see §5 and the
-required-changes doc §5 for the fragility this introduces).
+`buf[1]` directly. This is intentional. MI-bit reassembly is implemented in
+the ESP32-side `pn532_cmd.c` wrapper, not in PN532 firmware. The current raw
+LLI path remains safe because the protocol maximum C-APDU is 261 bytes while
+one `TgGetData` response carries 262 bytes, so chaining cannot occur under
+the current protocol limits.
 
 `pn532_tg_init_as_target`'s `result` struct is intentionally thin:
 
@@ -218,13 +219,14 @@ establishing ISO-DEP activation — that's correct, because Transport/Session
 only care about the first real C-APDU (M1), which arrives later via
 `lli_receive_apdu` → `TgGetData`, not via `TgInitAsTarget`'s own response.
 
-Nothing needs to change here for Session. Treat this layer as frozen
-(one bug-fix candidate, `PN532_TG_MODE` flag combination, is covered as an
-optional hardening item in the required-changes doc, not a correctness bug).
+The command layer is complete for the current LLI use case. Its
+`pn532_tg_get_data` wrapper includes ESP32-side MI-bit reassembly for callers
+that need it; LLI intentionally uses the raw core-driver path to preserve the
+PN532 status byte.
 
 ---
 
-## 5. LLI — as built, target contract
+## 5. LLI — as built
 
 `lli.h` — the sole PN532-shaped surface above the drivers, matching the
 Hardware/Link-Layer spec's five normative primitives exactly.
@@ -272,14 +274,15 @@ Link-status mapping (`lli_get_link_status`):
 `lli_abort`: ACK → `InRelease(Tg=0x00)` → `pn532_wakeup`, best-effort,
 always returns `LLI_OK`.
 
-**This layer needs several concrete fixes before it's Session-ready** — see
-`communication_module_required_changes.md` §1–§5. None of them change the
-five function signatures above; they change internal behavior only, so
-nothing above LLI (Transport, Session) needs to know they happened.
+The LLI is implemented and is the only layer above the PN532 stack that
+exposes card-emulation operations. It validates the configured general and
+historical-byte lengths, initializes the PN532, reapplies ISO-DEP target
+configuration on activation, and maps PN532 target status/error codes to the
+LLI taxonomy shown above.
 
 ---
 
-## 6. Transport — as built, target contract
+## 6. Transport — as built
 
 `transport.h` — ISO-DEP-shaped state machine, framing, INS dispatch, THS.
 Zero PN532 knowledge, zero crypto knowledge.
@@ -328,16 +331,14 @@ transport_err_t transport_run_session(transport_handle_t handle);
 transport_state_t transport_get_state(transport_handle_t handle);
 ```
 
-**Important design confirmation:** the single `on_apdu` callback is
-**sufficient** for Session — it does not need to be split into
+The single `on_apdu` callback is sufficient for Session — it does not need to be split into
 per-INS hooks. Transport already validates INS-vs-state and only forwards
-APDUs that are legal to receive in the current state (per §5.1's table);
+APDUs that are legal to receive in the current state;
 Session's implementation of `on_apdu` just switches on `capdu->ins`
 internally (0x10 → build M2, 0x11 → verify M3, 0x20 → decrypt/dispatch/
-encrypt) and returns `TRANSPORT_OK` / an error exactly as documented in
-`transport.md`. **This means Transport needs no API changes for Session to
-be wired in** — only the one state-machine bug in
-`communication_module_required_changes.md` §6.
+encrypt) and returns `TRANSPORT_OK` or an error. Transport is already wired
+to accept these callbacks; the remaining integration work is constructing
+both handles from an application-level facade.
 
 `on_erase` is invoked before every RELEASED transition, exactly once per
 teardown path, per the secure-erase invariant already documented in
@@ -348,7 +349,7 @@ no-op), HANDSHAKE (ephemeral keys exist — wipe them), or SECURE_SESSION
 
 ---
 
-## 7. Session — design (not yet built)
+## 7. Session — as built
 
 `session.h/.c` implements exactly two function pointers that plug directly
 into `transport_config_t` with **no adapter shim**:
@@ -380,15 +381,15 @@ typedef session_err_t (*session_app_cmd_handler_t)(
     void *app_ctx);
 
 // Enumerates candidate long-term Ed25519 public keys for M3 verification.
-// Called with index = 0, 1, 2, ... until it returns false.
+// Called with index = 0, 1, 2, ... up to SESSION_MAX_PEER_CANDIDATES (64),
+// or until it returns false.
 typedef bool (*session_peer_key_provider_t)(
     size_t index, uint8_t pubkey_out[32], void *provider_ctx);
 
 typedef struct {
     // Local long-term identity (Lock's own Ed25519 keypair).
-    // Raw bytes today; swap for a signing-callback pair when the
-    // ATECC608A migration lands (session spec §9.1) — see required-changes
-    // doc §7 for why this must be a seam now, not bytes.
+    // Raw bytes today; the private crypto seam is the migration point for
+    // a future hardware-backed signing implementation.
     uint8_t local_sk[64];
     uint8_t local_pk[32];
 
@@ -420,14 +421,16 @@ must:
 
 1. Build the transcript `pk_eph_P ‖ pk_eph_L ‖ c_P ‖ c_L` (domain-separated,
    §7.3 below).
-2. Loop `index = 0, 1, 2, ...`, calling the provider each time.
-3. For each candidate `PK_P`, attempt `crypto_sign_verify_detached` against
-   `Sig_P`.
+2. Loop `index = 0, 1, 2, ...` up to `SESSION_MAX_PEER_CANDIDATES` (64),
+   calling the provider each time. Reaching the bound is treated exactly like
+   the provider returning `false`.
+3. For each candidate `PK_P`, attempt Ed25519 verification against `Sig_P`.
 4. On the first success, that candidate is the authenticated identity for
    this session — proceed to key derivation.
-5. If the provider returns `false` (exhausted) with no successful
-   verification, treat it identically to a single bad signature:
-   `SESSION_ERR_AUTH_FAILED`, which Transport maps to `0x69 0x82` + erase.
+5. If the provider returns `false`, or the bound is reached, with no
+   successful verification, treat it identically to a single bad signature:
+   the callback returns a non-OK transport error, which Transport maps to
+   `0x69 0x82` + erase.
 
 This is the same trust model as an `authorized_keys` file: cheap per-key
 verification (~ms), a realistically small candidate count (owner + a
@@ -483,7 +486,7 @@ practice.
 1. Validate `m3_len == 64` (`Sig_P`); wrong length →
    `TRANSPORT_ERR_INVALID_APDU`.
 2. Rebuild the same transcript from cached M1/M2 values.
-3. Run the resolver loop from §7.2. No match → `SESSION_ERR_AUTH_FAILED`.
+3. Run the resolver loop from §7.2. No match → a non-OK transport error.
 4. On match: `SharedSecret = X25519(sk_eph_L, pk_eph_P)`;
    `PRK = HKDF-Extract(salt = c_P ‖ c_L, ikm = SharedSecret)`;
    `K_p2e = HKDF-Expand(PRK, "phone->esp", 32)`;
@@ -495,30 +498,30 @@ practice.
    `HANDSHAKE`.
 
 **`session_handle_secure_payload`:**
-1. Parse `in` as `nonce(12) ‖ ciphertext ‖ tag(16)`. (Transport has already
-   enforced `Lc ≤ 227 + 28` at the framing level — see required-changes
-   doc §8 for the one place this budget check needs to be pinned down
-   precisely against Session's expectations.)
-2. AES-256-GCM decrypt with `K_p2e`. Tag mismatch →
-   `SESSION_ERR_AUTH_FAILED` (maps to `0x69 0x82` + erase, per transport
-   spec §7: "An AES-GCM authentication tag mismatch MUST be treated
-   identically to a handshake signature failure").
+1. Parse `in` as `nonce(12) ‖ ciphertext ‖ tag(16)`. Transport currently
+   enforces `Lc ≤ 227` for the complete encrypted payload; after the 28-byte
+   GCM overhead this permits up to 199 plaintext bytes on the active wire
+   path. Session's internal plaintext buffer remains sized for 227 bytes.
+2. AES-256-GCM decrypt with `K_p2e`. Tag mismatch → a non-OK transport
+   error (maps to `0x69 0x82` + erase, per transport spec §7: "An AES-GCM
+   authentication tag mismatch MUST be treated identically to a handshake
+   signature failure").
 3. On success, call `app_handler(plaintext, len, out_plain, &out_len,
    app_handler_ctx)`. Session does not interpret `plaintext` — it is purely
    a courier here, per the session spec's §10 collaboration contract.
 4. Encrypt `out_plain` with `K_e2p` + fresh CSPRNG nonce → write
    `nonce ‖ ciphertext ‖ tag` into `rapdu`, `sw1/sw2 = 0x90 0x00`.
-5. If `app_handler` itself returns an error, that's an Application-layer
-   concern, not a Session one — do **not** erase or fail the transport
-   session for it; the correct behavior is for the Application handler to
-   encode its own failure status into the plaintext response per the
-   Application spec §6 (`APP_STATUS_*` byte), which Session then encrypts
-   and returns normally with `sw1/sw2 = 0x90 0x00`. Only crypto-level
-   failures (step 2) terminate the session.
+5. Application-level failures must be encoded in the plaintext response and
+   the handler must still return `SESSION_OK`. A non-`SESSION_OK` return is
+   reserved for genuine internal failures; Session then returns an empty
+   encrypted payload while Transport returns `sw1/sw2 = 0x90 0x00`. Only
+   crypto-level failures (step 2) terminate the session.
 
-**`session_on_erase`:** `sodium_memzero` on `sk_eph_L`, `SharedSecret`,
-`PRK`, `K_p2e`, `K_e2p`, and clear the cached M1/M2 transcript values.
-Idempotent — safe to call on a session that never got past ACTIVATED.
+**`session_on_erase`:** `session_crypto_zeroize` clears the cached M1/M2
+values, ephemeral keys, challenges, and directional keys, then returns the
+stage to `EMPTY`. It is idempotent and safe to call on a session that never
+got past ACTIVATED. The long-term identity survives erase and is cleared by
+`session_deinit`.
 
 ---
 
@@ -589,40 +592,36 @@ promptly rather than trusting stale state.
 
 ---
 
-## 9. End-to-End Call Chain (one full session)
+## 9. End-to-End Call Chain (implemented layers)
 
 ```
-Application:  comm_module_register... (done once at boot)
-Application:  comm_module_run_once(h)
-  comm_module → transport_run_session(transport_h)
-    transport  → lli_activate(lli_h, activate_timeout_ms)
-      lli      → pn532_tg_init_as_target(pn532_h, &params, &result, timeout)
-        pn532_cmd → pn532_send_command(0x8C) → pn532_receive_response(0x8D)
-          pn532    → pn532_i2c_write / wait_ready / read_frame
-    [reader taps phone; PN532 auto-handles SENS/SDD/SEL/RATS/ATS]
-    transport  → state = ACTIVATED
-    transport  → lli_receive_apdu(...) → C-APDU (INS=0x10, M1)
-    transport  → validates INS==0x10 in ACTIVATED → calls on_apdu (session_on_apdu)
-      session  → session_handle_m1(...) → builds M2, returns TRANSPORT_OK
-    transport  → lli_send_apdu(M2) → state = HANDSHAKE, THS timer starts
-    transport  → lli_receive_apdu(...) → C-APDU (INS=0x11, M3)
-    transport  → validates INS==0x11 in HANDSHAKE → calls on_apdu
-      session  → session_handle_m3(...) → resolver loop, verify, derive keys
-    transport  → lli_send_apdu(0x90 0x00) → state = SECURE_SESSION
-    loop:
-      transport → lli_receive_apdu(...) → C-APDU (INS=0x20, secure payload)
-      transport → calls on_apdu
-        session → session_handle_secure_payload(...)
-          session → AES-GCM decrypt → app_handler(plaintext) → AES-GCM encrypt
-      transport → lli_send_apdu(encrypted R-APDU)
-    [reader sends CMD_SESSION_ABORT, or link drops, or THS expires]
-    transport  → on_erase (session_on_erase) → state = RELEASED
-    transport  → lli_abort(lli_h) → state = IDLE
-  comm_module ← TRANSPORT_OK
-Application:  loop back to comm_module_run_once (or use run_forever)
+Current firmware (`app_main`):
+  app_main → lli_init(test_cfg)
+    lli → pn532_i2c_create → pn532_init → pn532_wakeup
+    lli → pn532_get_firmware_version
+    lli → configure PN532 for ISO-DEP card emulation
+  test harness → lli_activate(...)
+    lli → pn532_tg_init_as_target(...)
+  test harness → lli_receive_apdu(...)
+    lli → pn532_send_command(TgGetData) → pn532_receive_response(...)
+  test harness → lli_send_apdu(...)
+    lli → pn532_tg_set_data(...)
+  test harness → lli_abort(...) → lli_deinit(...)
 ```
 
-Every arrow crosses exactly one layer boundary. No layer reaches down two
-levels at once anywhere in this chain — that invariant is what makes the
-"swap the controller / swap the transport / swap the crypto" promise in all
-four specs actually true in the code, not just on paper.
+The Session-enabled path described by the planned facade is not currently
+exercised by `app_main`. Once the facade exists, it will construct a Session
+handle, register `session_on_apdu` and `session_on_erase` in a Transport
+configuration, construct the Transport handle, and repeatedly call
+`transport_run_session`. The resulting runtime path will be:
+
+```
+facade → transport_run_session → LLI → PN532
+                         ↘ session callbacks
+                           ↘ application plaintext handler
+```
+
+The implemented layers preserve the intended dependency direction: Session
+depends on Transport, Transport depends on LLI, and LLI depends on the PN532
+driver stack. No facade or application-level authorization behavior is
+implemented yet.
