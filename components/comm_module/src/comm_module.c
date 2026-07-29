@@ -110,6 +110,12 @@ static void comm_task_fn(void *arg)
 {
     (void)arg;
 
+    /* Capture our own handle immediately so xTaskNotifyGive(g_comm_task) from
+     * comm_module_complete_response can never race the pxCreatedTask out-param
+     * written by xTaskCreate, which on a preemptive SMP system may be assigned
+     * only after this task has already started running. */
+    g_comm_task = xTaskGetCurrentTaskHandle();
+
     while (!g_stop_requested) {
         transport_run_session(g_transport);
     }
@@ -210,6 +216,12 @@ comm_err_t comm_module_deinit(void)
         g_session = NULL;
     }
     memset(&g_mailbox, 0, sizeof(g_mailbox));
+    /* Clear task handles/flags so a subsequent init + register_app_task +
+     * start is clean rather than inheriting the previous instance's state. */
+    g_app_task = NULL;
+    g_comm_task = NULL;
+    g_stop_requested = false;
+    g_session_active = false;
     return COMM_OK;
 }
 
@@ -305,6 +317,14 @@ comm_err_t comm_module_get_command(uint8_t *buf, size_t buf_cap,
 void comm_module_complete_response(const uint8_t *response,
                                    size_t response_length)
 {
+    /* Only complete a command that is actually pending. A late call after the
+     * comm task's bounded wait already timed out (command_valid cleared by the
+     * timeout path) must not write a response or notify — otherwise the stale
+     * xTaskNotifyGive(g_comm_task) would prematurely satisfy the NEXT
+     * command's ulTaskNotifyTake and deliver these bytes as its reply. */
+    if (!g_mailbox.command_valid) {
+        return;
+    }
     g_mailbox.command_valid = false;
 
     if (response && response_length > 0) {

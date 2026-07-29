@@ -150,8 +150,13 @@ void comm_module_start(void);
 void comm_module_stop(void);
 
 /**
- * Best-effort abort: calls lli_abort if a session is active.  Does not
- * interrupt a blocking lli_activate call (no cancellation checkpoint there).
+ * Best-effort abort: sets the comm task's stop flag.  Does NOT interrupt a
+ * blocking lli_activate call — there is no cancellation checkpoint inside it,
+ * and the LLI handle is owned by the transport layer and is not directly
+ * reachable from here — and does not interrupt a session mid-flight; it takes
+ * effect only at the top of the comm task's next loop iteration. Currently
+ * functionally equivalent to comm_module_stop(); kept as a distinct entry
+ * point for a future cancel-safe primitive below LLI.
  *
  * @return COMM_OK.
  */

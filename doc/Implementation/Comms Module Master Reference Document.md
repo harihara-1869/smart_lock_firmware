@@ -20,11 +20,13 @@ application code on its own task.
 | LLI | Built | `lli.md` |
 | Transport | Built | `transport.md` |
 | Session | Built | `session.md` |
-| Comm Module Facade | **Not yet built** — designed below | — |
+| Comm Module Facade | Built | `comm_module.md` |
 
-The current repository builds the PN532, LLI, Transport, and Session layers,
-but does not yet provide the planned facade or Application Module.  The
-firmware entry point is currently an LLI hardware test harness in
+The current repository builds the PN532, LLI, Transport, Session, and Comm
+Module Facade layers, but does not yet provide the Application Module.  The
+Comm Module Facade (§8) is now built per `comm_module.md`; where the as-built
+code diverges from §8's design, the implementation is the source of truth.
+The firmware entry point is currently an LLI hardware test harness in
 `main/smart_lock_firmware.c`; it does not wire Session into Transport.
 
 ---
