@@ -11,15 +11,17 @@ application through callbacks.
 
 ```
 ┌──────────────────────────┐
-│      Application         │  Crypto: ECDH, AES-GCM, Ed25519, key storage
+│   Application Module     │  dispatch / authorization / AAI (external peer)
+├──────────────────────────┤
+│      Session Layer       │  Mutual-auth handshake, AES-256-GCM, secure erase
 ├──────────────────────────┤
 │     Transport Layer      │  ← this component
 ├──────────────────────────┤
-│           LLI            │  Card emulation, APDU I/O, abort
+│           LLI            │  card emulation, APDU I/O
 ├──────────────────────────┤
 │   PN532 Command Layer    │  NFC commands
 ├──────────────────────────┤
-│    PN532 Core Driver     │  Frame format, checksums
+│    PN532 Core Driver     │  frame format, checksums
 ├──────────────────────────┤
 │   PN532 I2C Transport    │  I2C master, IRQ/polling
 ├──────────────────────────┤

@@ -1,8 +1,14 @@
 # Communication Module — Master Reference
 
 **Scope:** PN532 I2C Transport → PN532 Core Driver → PN532 Command Layer → LLI
-→ Transport → Session. The Application Module (command dispatch, authorization,
-AAI/lock actuation) is an external peer and is out of scope for this document.
+→ Transport → Session → Comm Module Facade. The Application Module (lock
+state, motor control, tamper detection, sensor monitoring, business logic,
+authorization policy) is an external peer and its internals are out of
+scope here — §10 covers only the contract it must honor at the facade
+boundary. As of this revision, the facade (§8) hands commands and session
+events to the Application via a mailbox + task-notification handoff rather
+than direct callbacks, so that the Communication Module never executes
+application code on its own task.
 
 **Status of each layer**, per the current implementation:
 
@@ -404,6 +410,18 @@ session_err_t session_init(const session_config_t *cfg, session_handle_t *out);
 session_err_t session_deinit(session_handle_t h);
 ```
 
+> **Who actually supplies `app_handler`?** Under the mailbox architecture
+> (§8), this function pointer is **not** application code — it's a small
+> trampoline owned and implemented by the Comms facade
+> (`comm_module_dispatch_via_mailbox`, §8.3) that populates the mailbox,
+> notifies the Application task, and blocks for its response. Session's
+> contract here is completely unchanged: it calls whatever `app_handler`
+> was registered at `session_init` time and treats it as an opaque
+> synchronous function. It has no idea — and doesn't need to know — that
+> the function on the other side now hands off to a different task instead
+> of running inline. This is precisely what keeps "Session never executes
+> application code" true without Session itself changing at all.
+
 ### 7.2 Why a resolver, and how it actually resolves identity
 
 Worth being explicit about this, because it's the one place the protocol
@@ -523,26 +541,180 @@ stage to `EMPTY`. It is idempotent and safe to call on a session that never
 got past ACTIVATED. The long-term identity survives erase and is cleared by
 `session_deinit`.
 
----
+### 7.4 Session lifecycle events — new, additive seam
 
-## 8. Comm Module Facade — design (not yet built)
+Nothing in Session as built today tells anyone *when* a session becomes
+authenticated or when it ends — `session_on_apdu` returns per-APDU, and
+`session_on_erase` fires on every teardown regardless of how far the
+session got. Neither is "a session now exists" or "a session just ended,"
+and this is exactly what the facade needs to expose to the Application (see
+§8.2). Session is the right place to add it, not Transport: Session's
+`stage` field (`EMPTY`/`EPHEMERAL`/`ESTABLISHED`, §7 above) already knows
+precisely when the real transition happens — Transport has no equivalent
+concept, it only knows APDU-level states.
 
-`comm_module.h` — the only header the Application Module includes. Wires
-Session + Transport + LLI + drivers behind one config struct and re-exports
-just enough surface for the Application's actual needs (register a handler,
-run, check liveness, force-abort).
+Two new **optional** fields on `session_config_t`, both NULL-safe, neither
+changing any existing signature:
 
 ```c
-typedef struct comm_module_t *comm_module_handle_t;
+typedef void (*session_event_handler_t)(void *event_ctx);
 
+typedef struct {
+    // ... all existing fields unchanged ...
+    session_event_handler_t on_established;  // fires once, stage EPHEMERAL -> ESTABLISHED
+    session_event_handler_t on_terminated;   // fires once, only if stage was ESTABLISHED at erase time
+    void *event_ctx;
+} session_config_t;
+```
+
+Wiring, no new call sites beyond the two existing handlers:
+
+- **`on_established`** is called from the tail of `session_handle_m3`,
+  after key derivation succeeds and the stage is set to `ESTABLISHED`, but
+  before returning `TRANSPORT_OK` to Transport. If NULL, skipped.
+- **`on_terminated`** is called from inside `session_on_erase`, guarded by
+  `if (stage == ESTABLISHED) on_terminated(event_ctx);` *before* the stage
+  is reset to `EMPTY`. This means it does **not** fire for a session that
+  never got past ACTIVATED or HANDSHAKE (no real session existed to end),
+  only for one that actually reached SECURE_SESSION at some point. If NULL,
+  skipped.
+
+Both callbacks run on whatever task is currently inside
+`transport_run_session` — the same task, the same call stack, as
+`on_apdu`. They must be fast and non-blocking for the same reason
+`app_handler` must be: they're inline in the middle of the state machine,
+not dispatched asynchronously.
+
+---
+
+## 8. Comm Module Facade — implementation plan (not yet built)
+
+### 8.0 Where the IRQ actually is, and why the facade doesn't touch it
+
+Worth stating plainly, because it's easy to assume the facade needs its own
+interrupt handling: **there is exactly one PN532 IRQ pin in this entire
+module, it is already fully owned and wired by `pn532_i2c_create` (§2), and
+nothing above the I2C transport layer — not the core driver, not LLI, not
+Transport, not Session, and not the facade — should ever touch a GPIO or
+install an ISR of their own.**
+
+What the existing IRQ actually does: `pn532_i2c_ctx_t` installs a
+falling-edge ISR (`pn532_irq_isr`) that does one thing —
+`xSemaphoreGiveFromISR(c->irq_sem, ...)`. That's it. It's a "the PN532 has
+something ready" doorbell, nothing more. The task-level code that's
+actually blocked — inside `pn532_i2c_wait_ready` → `wait_ready_irq` →
+`xSemaphoreTake(irq_sem, timeout)` — is what "wakes up" when the ISR fires.
+That blocked call could be sitting anywhere in the stack: inside
+`TgInitAsTarget` waiting for a reader to tap, inside `TgGetData` waiting for
+the next C-APDU, or inside the ACK/response read for any other command.
+**The IRQ fires many times over the life of one session** (once per
+reader-activation, then once per APDU exchanged) — it is not a single
+"session created" event and was never designed to be one.
+
+This has a direct consequence for where "establishing a session" runs:
+handshake verification (Ed25519 verify, X25519, HKDF, AES-GCM) happens
+inside `session_handle_m3`, which is called synchronously from
+`session_on_apdu`, which is called synchronously from
+`transport_run_session`, which blocks on `lli_receive_apdu`, which blocks
+on the exact same IRQ semaphore described above. All of that — the crypto
+included — necessarily executes in whatever **task** is running
+`transport_run_session`. It cannot run in ISR context: ISRs on this
+platform have a small dedicated stack, cannot call blocking FreeRTOS or
+I2C APIs, and neither Monocypher nor mbedTLS are written to be
+interrupt-safe. Trying to "have the ISR establish the session" would mean
+moving multi-millisecond blocking I2C transactions and crypto into
+interrupt context — not a design tweak, a rewrite that breaks the whole
+stack's threading model.
+
+**So: `comm_module_init` sets up zero ISRs.** The IRQ ISR is created once,
+inside `pn532_i2c_create`, as a side effect of `lli_init` — exactly as it
+already is today. What the facade *does* own is a **FreeRTOS task**, whose
+entire body is a loop calling the already-blocking `transport_run_session`.
+The IRQ is what makes that task's blocking calls efficient (semaphore wait,
+not a busy-poll); the facade's job is task lifecycle, not interrupt
+plumbing.
+
+### 8.1 Why this section was rewritten: mailbox instead of direct callbacks
+
+The design in the rest of this document (and in an earlier revision of
+this section) had the facade call `app_handler` and
+`on_session_established`/`on_session_ended` as plain C function pointers,
+executed inline on the comm task. That violates a boundary worth being
+strict about: **the Communication Module must never directly execute
+application code.** A function pointer supplied by the Application and
+invoked synchronously on the comm task's stack, inside the middle of the
+ISO-DEP/crypto state machine, is exactly that — regardless of how thin the
+wrapper looks. If application code — lock state checks, motor control,
+authorization policy — ever grows a blocking call, a long computation, or a
+bug, it now stalls the comm task, which stalls the NFC protocol timing
+(`THS`, `apdu_timeout_ms`) underneath it.
+
+The fix is a **mailbox + task-notification handoff**: the Application runs
+on its own task, with its own stack, its own scheduling, and its own
+ongoing responsibilities (tamper/integrity monitoring chief among them)
+that must keep running whether or not a phone is anywhere nearby. The comm
+task and the Application task each own a strict half of a small shared
+struct, and pass control back and forth with `xTaskNotifyGive`/
+`ulTaskNotifyTake` — no queues, no dynamic allocation, no mutex.
+
+This does **not** change Session or Transport at all (per the note at the
+end of §7.1) — only what the facade plugs into `session_config_t.app_handler`
+and into the §7.4 event seam changes, from "call app code directly" to
+"hand off via mailbox."
+
+### 8.2 Mailbox
+
+The mailbox struct itself is an **internal** type — it does not appear in
+`comm_module.h`. The Application never sees its layout or holds a pointer
+into it; it only calls accessor functions. This is deliberate: exposing the
+raw struct (even as `const`) would either leak internal layout into the one
+header the Application is supposed to depend on, or invite the Application
+to write into fields out of turn, which is the one thing that would break
+the handoff invariant below.
+
+```c
+// comm_module.c — internal only, never exposed in comm_module.h
+
+typedef enum {
+    COMM_APP_EVENT_NONE = 0,
+    COMM_APP_EVENT_SESSION_STARTED,
+    COMM_APP_EVENT_SESSION_ENDED,
+} comm_app_event_t;
+
+typedef struct {
+    // Comms task writes these; Application task only reads them.
+    bool    command_valid;
+    uint8_t command[227];       // sized to the plaintext budget, §7.3
+    size_t  command_length;
+    comm_app_event_t pending_event;
+
+    // Application task writes these; Comms task only reads them.
+    uint8_t response[227];
+    size_t  response_length;
+} comm_mailbox_t;
+```
+
+**Hard invariant — no mutex protects this struct.** Its correctness relies
+entirely on strict ping-pong ownership, enforced by the notification
+handshake, never by locking:
+
+- The comm task may only write `command*`/`pending_event` and then must
+  not touch the mailbox again until it has been notified back.
+- The Application task may only write `response*`, and only after it has
+  been notified that a command (or event) is waiting, and must not touch
+  the mailbox again until notified of the next one.
+- `xTaskNotifyGive`/`ulTaskNotifyTake` already impose the memory barrier
+  this handoff needs — no additional synchronization is required, but the
+  ping-pong discipline itself must never be violated (e.g. by adding a
+  second producer, or by either side "peeking" out of turn to optimize
+  latency).
+
+### 8.3 Config and public API
+
+```c
 typedef enum {
     COMM_OK = 0, COMM_ERR_TIMEOUT, COMM_ERR_INVALID_ARG, COMM_ERR_INTERNAL,
 } comm_err_t;
-
-typedef session_err_t (*comm_app_command_handler_t)(
-    const uint8_t *plaintext_in, size_t len_in,
-    uint8_t *plaintext_out, size_t *len_out,
-    void *app_ctx);
 
 typedef struct {
     // → lli_config_t (GPIOs, I2C port/clock, card identity bytes)
@@ -563,32 +735,156 @@ typedef struct {
     session_peer_key_provider_t peer_key_provider;
     void *peer_key_provider_ctx;
 
-    // Application's one required registration
-    comm_app_command_handler_t app_handler;
-    void *app_handler_ctx;
+    // Bounds the "waiting for the Application task to answer a command"
+    // step (§8.4) — this is new; nothing bounded this step before.
+    uint32_t app_response_timeout_ms;  // recommended >= integrity-check period (§10)
+
+    // Internal task ownership
+    uint32_t    task_stack_size;   // 0 => facade default (>= 8 KiB: crypto + I2C both on this stack)
+    UBaseType_t task_priority;     // 0 => facade default
+    BaseType_t  task_core_id;      // tskNO_AFFINITY by default
 } comm_module_config_t;
 
-comm_err_t comm_module_init(const comm_module_config_t *cfg, comm_module_handle_t *out);
-comm_err_t comm_module_deinit(comm_module_handle_t h);
-comm_err_t comm_module_run_once(comm_module_handle_t h);
-comm_err_t comm_module_run_forever(comm_module_handle_t h);
-bool       comm_module_is_session_active(comm_module_handle_t h);
-comm_err_t comm_module_force_abort(comm_module_handle_t h);
+// One instance per device — this firmware has exactly one PN532 and one
+// lock, so the facade is a singleton rather than a handle, matching the
+// shape of the mailbox itself (there is exactly one).
+comm_err_t comm_module_init(const comm_module_config_t *cfg);
+comm_err_t comm_module_deinit(void);
+
+// Must be called once, after the Application task exists, before comm_module_start().
+// Comms needs this handle to notify the Application task; nothing before
+// this point can deliver a command or event.
+comm_err_t comm_module_register_app_task(TaskHandle_t app_task);
+
+void comm_module_start(void);   // spawns the comm task, returns immediately
+void comm_module_stop(void);    // requests the comm task to exit; see §8.5 limitation
+comm_err_t comm_module_force_abort(void);
+
+bool comm_module_session_active(void);
+
+// Application task calls these three from its own task context only.
+comm_app_event_t comm_module_poll_event(void);     // returns and clears pending_event
+bool             comm_module_has_command(void);    // true if a command awaits a response
+comm_err_t       comm_module_get_command(uint8_t *buf, size_t buf_cap, size_t *len_out);
+void             comm_module_complete_response(const uint8_t *response, size_t response_length);
 ```
 
-`comm_module_init` builds `lli_config_t` → `transport_config_t` →
-`session_config_t` internally, sets
-`transport_config_t.on_apdu = session_on_apdu`,
-`transport_config_t.on_erase = session_on_erase`,
-`transport_config_t.user_ctx = <session_handle_t>`, then calls
-`session_init` → `transport_init`. Nothing in this wiring requires any of
-the five lower layers to change.
+`comm_module_complete_response` intentionally takes the response bytes
+directly, copies them into the mailbox, and performs the notify in one
+call — it is not split into "get a mutable pointer, write into it yourself,
+then call complete with just a length." A two-step version invites the
+Application to hold a stale pointer or forget the second call; this
+version has no window where the invariant in §8.2 can be broken by mistake.
 
-`comm_module_is_session_active` is what the Application spec's §5.2 step 2
-needs — "confirm session still active immediately before actuation." It's a
-thin call to `transport_get_state(h) == TRANSPORT_STATE_SECURE_SESSION`
-combined with a fresh `lli_get_link_status` check, so it reflects RF-loss
-promptly rather than trusting stale state.
+`comm_module_init` builds `lli_config_t` → `transport_config_t` →
+`session_config_t` internally exactly as before, but now wires
+`session_config_t.app_handler` to an **internal** trampoline,
+`comm_dispatch_via_mailbox` (§8.4) — never to anything the Application
+supplies — and wires the §7.4 event seam
+(`session_config_t.on_established`/`.on_terminated`) to a second internal
+trampoline that posts `COMM_APP_EVENT_SESSION_STARTED`/`_ENDED` and
+notifies, rather than calling an application-supplied function pointer
+directly.
+
+### 8.4 The two handoffs: commands vs. lifecycle events
+
+These are **not symmetric**, and that asymmetry is deliberate:
+
+**Commands are a synchronous round-trip** — the phone is sitting there over
+NFC waiting for an R-APDU, so the comm task must actually wait for the
+Application's answer before it can encrypt and send one:
+
+```c
+// Internal trampoline registered as session_config_t.app_handler.
+static session_err_t comm_dispatch_via_mailbox(
+        const uint8_t *plaintext_in, size_t len_in,
+        uint8_t *plaintext_out, size_t *len_out, void *ctx)
+{
+    mailbox.command_length = len_in;
+    memcpy(mailbox.command, plaintext_in, len_in);
+    mailbox.command_valid = true;
+
+    xTaskNotifyGive(g_app_task);
+
+    // Bounded — see the honesty note below.
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(g_cfg.app_response_timeout_ms)) == 0) {
+        mailbox.command_valid = false;         // give up waiting; don't leave it set
+        return SESSION_ERR_INTERNAL;           // → empty encrypted ack, 0x90 0x00 (§7.3)
+    }
+
+    *len_out = mailbox.response_length;
+    memcpy(plaintext_out, mailbox.response, *len_out);
+    return SESSION_OK;
+}
+```
+
+**Session lifecycle events are fire-and-forget** — there is no APDU tied to
+"a session started," so the comm task does not wait for the Application to
+acknowledge it, it just posts the event and moves straight on to whatever
+Transport does next:
+
+```c
+// Internal trampolines registered as session_config_t.on_established / .on_terminated.
+static void comm_on_established(void *ctx) {
+    mailbox.pending_event = COMM_APP_EVENT_SESSION_STARTED;
+    xTaskNotifyGive(g_app_task);
+}
+static void comm_on_terminated(void *ctx) {
+    mailbox.pending_event = COMM_APP_EVENT_SESSION_ENDED;
+    xTaskNotifyGive(g_app_task);
+}
+```
+
+**Honesty note on the bounded wait:** if the Application task never calls
+`comm_module_complete_response` within `app_response_timeout_ms` — stuck in
+a long integrity check, deadlocked, crashed — the comm task gives up,
+Session returns an empty successful ack to the phone (per the existing
+non-OK-handler contract, §7.3), and the *phone* sees a normal-looking
+response for a command that was never actually processed. That's a real
+failure mode worth monitoring for, not one this design eliminates: a
+repeated-timeout counter feeding `comm_module_force_abort` (or a
+watchdog/reboot at the Application level) is a reasonable mitigation, but
+it's the Application/system-integration layer's job to add, not something
+implicit here.
+
+### 8.5 Task model and its limitation
+
+The comm task's own loop is unchanged from the earlier draft — it just
+calls `transport_run_session` repeatedly:
+
+```c
+static void comm_task_fn(void *arg) {
+    while (!g_stop_requested) {
+        transport_run_session(g_transport);
+        // TRANSPORT_ERR_TIMEOUT (no reader) and TRANSPORT_OK (session ran to
+        // RELEASED) are both expected, steady-state outcomes — loop immediately.
+    }
+    g_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+```
+
+`comm_module_stop` requests exit and blocks until the task clears — it does
+**not** interrupt a session mid-flight, only takes effect the next time the
+loop reaches its top. `comm_module_force_abort` has the same underlying
+limitation noted before: during the long blocking wait inside
+`lli_activate(activate_timeout_ms)` (tens of seconds, waiting for a reader
+tap), there is currently no check point at all, so it takes effect only
+once a reader taps or that timeout elapses — closing that gap is real,
+scoped future work (a cancel-safe primitive below LLI), not something to
+claim already works.
+
+### 8.6 What the facade deliberately does not add
+
+- No new GPIO/ISR ownership (§8.0) — unchanged from before.
+- Exactly one comm task, exactly one Application task — the facade does
+  not spawn worker tasks, pools, or queues on the Application's behalf.
+- No buffering of more than one in-flight command — the NFC protocol is
+  strictly synchronous (one C-APDU outstanding at a time), so the mailbox
+  never needs to hold more than one command and one response.
+- No interpretation of the plaintext OPCODE/ARGS envelope, and no exposure
+  of the mailbox struct itself outside `comm_module.c` — the Application
+  only ever sees `comm_module.h`'s accessor functions.
 
 ---
 
@@ -609,19 +905,146 @@ Current firmware (`app_main`):
   test harness → lli_abort(...) → lli_deinit(...)
 ```
 
-The Session-enabled path described by the planned facade is not currently
-exercised by `app_main`. Once the facade exists, it will construct a Session
-handle, register `session_on_apdu` and `session_on_erase` in a Transport
-configuration, construct the Transport handle, and repeatedly call
-`transport_run_session`. The resulting runtime path will be:
+The Session-enabled path described by the facade is not currently exercised
+by `app_main`. Once the facade exists, `comm_module_init` will construct a
+Session handle (registering the internal mailbox trampolines from §8.4 in
+place of the §7.4 seam's callbacks), register `session_on_apdu`/
+`session_on_erase` in a Transport configuration, and construct the Transport
+handle; `comm_module_start` will spawn the one FreeRTOS comm task that
+repeatedly calls `transport_run_session`. No new ISR is created anywhere in
+this wiring (§8.0). The resulting runtime path involves two tasks, not one:
 
 ```
-facade → transport_run_session → LLI → PN532
-                         ↘ session callbacks
-                           ↘ application plaintext handler
+Application:  creates its own task → comm_module_register_app_task(app_task)
+              → comm_module_start()
+                                          │
+                              [comm task, spawned once]
+                                          │
+                    loop: transport_run_session(transport_h)
+                              │
+                     lli_activate / lli_receive_apdu / lli_send_apdu
+                     (each blocks on the PN532 IRQ semaphore, owned by
+                      pn532_i2c.c, unrelated to comm_module or Session)
+                              │
+              M3 verifies ──► session stage → ESTABLISHED
+                              │
+              comm task: mailbox.pending_event = SESSION_STARTED
+                         xTaskNotifyGive(app_task)  [fire-and-forget, §8.4]
+                              │
+              secure payload arrives ──► comm_dispatch_via_mailbox runs
+                              │            (still on the comm task)
+                    mailbox.command = plaintext; notify app task
+                    comm task BLOCKS on ulTaskNotifyTake(app_response_timeout_ms)
+                              │
+                                          ╲
+                                           ╲  [Application task, separate stack]
+                                            ╲   ulTaskNotifyTake wakes it
+                                             ╲  comm_module_get_command(...)
+                                              ╲ business logic runs HERE, not on comm task
+                                               ╲ comm_module_complete_response(...)
+                                                ╲
+              comm task wakes ◄─────────────────╯
+                    reads mailbox.response → returns to Session → AES-GCM
+                    encrypt → lli_send_apdu (R-APDU back to phone)
+                              │
+              erase while ESTABLISHED ──►
+              comm task: mailbox.pending_event = SESSION_ENDED
+                         xTaskNotifyGive(app_task)  [fire-and-forget]
 ```
+
+The key difference from the earlier direct-callback draft: everything
+below the dashed diagonal line runs on the **Application's own task and
+stack**, never on the comm task. The comm task's only involvement in that
+window is blocking on a notification with a bounded timeout.
 
 The implemented layers preserve the intended dependency direction: Session
 depends on Transport, Transport depends on LLI, and LLI depends on the PN532
 driver stack. No facade or application-level authorization behavior is
 implemented yet.
+
+---
+
+## 10. Guidelines for Designing the Application Module
+
+This module's internals — lock state, motor control, tamper detection,
+sensor monitoring, business logic, authorization policy — are explicitly
+**out of scope** for this document; they belong to their own design. What
+follows is the contract the Application Module must honor at the boundary
+described in §8, since getting this boundary wrong is exactly how a
+"clean separation" ends up quietly recoupled.
+
+**Own a single dedicated task, and never block it indefinitely.** The
+Application must have exactly one task that both runs its own recurring
+work (tamper/integrity monitoring chief among them) and services the
+mailbox. Use a bounded wait, not an unbounded one:
+
+```c
+while (1) {
+    perform_integrity_checks();   // application-owned; must run on a fixed cadence
+
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(INTEGRITY_PERIOD_MS))) {
+        comm_app_event_t ev = comm_module_poll_event();
+        if (ev == COMM_APP_EVENT_SESSION_STARTED) { /* e.g. arm a UI indicator */ }
+        if (ev == COMM_APP_EVENT_SESSION_ENDED)   { /* e.g. clear it */ }
+
+        if (comm_module_has_command()) {
+            uint8_t cmd[227]; size_t cmd_len;
+            comm_module_get_command(cmd, sizeof(cmd), &cmd_len);
+
+            uint8_t resp[227];
+            size_t resp_len = dispatch_and_build_response(cmd, cmd_len, resp);
+
+            comm_module_complete_response(resp, resp_len);
+        }
+    }
+}
+```
+
+If `INTEGRITY_PERIOD_MS` is not comfortably shorter than
+`app_response_timeout_ms` (§8.3), integrity checks will run late whenever a
+command is being processed — pick the period first, then set
+`app_response_timeout_ms` to something the Comms Module can wait for
+without that period slipping noticeably.
+
+**Encode every application-level outcome inside the response bytes, never
+via a return code the Comms Module can see.** `comm_module_complete_response`
+has no "this failed" signal — by design (§7.1's contract note). Access
+denied, wrong lock state, actuator fault, invalid command: all of these are
+the Application's own status byte inside `resp[]`, with a normal, non-empty
+call to `comm_module_complete_response`. A genuinely empty response should
+be rare and intentional, not a stand-in for "something went wrong."
+
+**Keep the handler itself fast; do slow or physically consequential work
+outside of it.** The comm task is blocked waiting for
+`comm_module_complete_response` for the entire duration between reading a
+command and calling it (§8.4) — that's borrowed time from the NFC protocol
+budget underneath it, not free. If an action genuinely takes long (a motor
+cycle, a flash write), the pattern to reach for is: reply promptly with an
+"accepted, in progress" status, run the physical action afterward on the
+Application's own schedule, and let a **separate**, later command (or a
+polled status field the Application owns) tell the phone it's done. Don't
+stretch `app_response_timeout_ms` to cover a slow actuator instead.
+
+**Authentication is not authorization.** Reaching `SECURE_SESSION` (and the
+`SESSION_STARTED` event) means the phone proved possession of a registered
+long-term key — nothing more. Whether that identity is allowed to unlock
+*this* lock *right now* — time-of-day policy, a tamper-triggered lockout,
+an explicitly revoked credential the resolver hasn't caught up to yet — is
+entirely the Application's decision, made per-command, inside its own
+business logic. Don't treat `COMM_APP_EVENT_SESSION_STARTED` as a signal to
+do anything irreversible; treat it as advisory (UI, logging, arming a
+timeout) and gate every actual action on the specific command received.
+
+**Integrity/tamper monitoring must not depend on NFC activity.** The
+bounded-wait loop above is what guarantees this — `perform_integrity_checks()`
+runs every `INTEGRITY_PERIOD_MS` regardless of whether a phone is present,
+mid-handshake, or the comm task is sitting in a long `lli_activate` wait.
+If tamper monitoring is ever moved onto a different task than the one
+servicing the mailbox, the same rule still applies: it must not share a
+task with anything that can block on `comm_module_*` calls.
+
+**Depend only on `comm_module.h`.** No Application source file should
+`#include` `session.h`, `transport.h`, `lli.h`, or any `pn532_*.h` — every
+example above only calls facade functions. If a task ever needs something
+this header doesn't expose, that's a signal to extend the facade
+deliberately, not to reach around it.

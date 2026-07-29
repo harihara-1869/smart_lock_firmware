@@ -248,6 +248,11 @@ static transport_err_t session_handle_m3(session_handle_t h,
     rapdu->sw2 = SESSION_SW2_OK;
 
     h->stage = SESSION_STAGE_ESTABLISHED;
+
+    if (h->cfg.on_established) {
+        h->cfg.on_established(h->cfg.event_ctx);
+    }
+
     return TRANSPORT_OK;
 }
 
@@ -386,6 +391,10 @@ void session_on_erase(void *ctx)
     session_handle_t h = (session_handle_t)ctx;
     if (!h) {
         return;
+    }
+
+    if (h->stage == SESSION_STAGE_ESTABLISHED && h->cfg.on_terminated) {
+        h->cfg.on_terminated(h->cfg.event_ctx);
     }
 
     /* Idempotent: wiping already-zeroed memory is harmless, and always
