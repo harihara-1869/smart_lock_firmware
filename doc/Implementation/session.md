@@ -118,12 +118,16 @@ fresh CSPRNG nonce.  Maximum plaintext is 227 bytes (255 − 28 overhead).
 
 Session never interprets plaintext.  The decrypted bytes go to the
 Application's `session_app_cmd_handler_t` and its reply is sealed verbatim.
-A handler error does **not** tear down the session — the Application encodes
-its own failure status into the plaintext reply; on a non-OK handler return
-session replies with an empty encrypted payload and `0x90 0x00`.  Only
-crypto-level failures (GCM tag mismatch) terminate the session, and a tag
-mismatch is treated identically to a handshake signature failure: Transport
-sends `0x69 0x82`, erases, and releases.
+Application-level failures (for example access denied, actuator jam,
+validation failure, or an invalid command) must be encoded in the plaintext
+reply, while the handler still returns `SESSION_OK`.  Returning a non-OK value
+does not communicate an application error to the phone: session replies with
+an empty encrypted payload and Transport still returns `0x90 0x00`.  Non-OK
+returns are reserved for genuine internal failures such as insufficient
+buffer space, internal errors, or crypto/backend failures.  Only crypto-level
+failures (GCM tag mismatch) terminate the session, and a tag mismatch is
+treated identically to a handshake signature failure: Transport sends
+`0x69 0x82`, erases, and releases.
 
 ## Peer-Key Resolution
 
@@ -134,10 +138,14 @@ enumeration.  `session_peer_key_provider_t` is an iterator, not a lookup:
 bool provider(size_t index, uint8_t pubkey_out[32], void *ctx);
 ```
 
-Session calls it with `index = 0, 1, 2, ...` until it returns `false`.  The
-first candidate that verifies `Sig_P` is the authenticated identity for the
-session.  Exhaustion with no match is an authentication failure (`0x69 0x82`
-+ erase), indistinguishable from a single bad signature.  Any candidate that
+Session calls it with `index = 0, 1, 2, ...` up to the fixed defensive bound
+`SESSION_MAX_PEER_CANDIDATES` (64), or until it returns `false`.
+Reaching the bound is treated exactly like the provider returning `false`:
+the first candidate that verifies `Sig_P` is the authenticated identity for
+the session, and exhaustion with no match is an authentication failure
+(`0x69 0x82` + erase), indistinguishable from a single bad signature.  The
+bound only protects against buggy provider implementations and does not
+change the behavior of correctly implemented providers.  Any candidate that
 verifies is by definition authorized — authentication implies authorization.
 
 ## Internal Stage Model
@@ -211,6 +219,17 @@ No other file in the component includes a crypto library header.
 | `peer_key_provider_ctx` | `void *` | Passed to the provider |
 | `app_handler` | `session_app_cmd_handler_t` | Required. Plaintext command handler |
 | `app_handler_ctx` | `void *` | Passed to the handler |
+| `on_established` | `session_event_handler_t` | Optional. Callback when session reaches ESTABLISHED |
+| `on_terminated` | `session_event_handler_t` | Optional. Callback when ESTABLISHED session ends |
+| `event_ctx` | `void *` | Passed to event callbacks |
+
+#### `session_event_handler_t`
+
+```c
+typedef void (*session_event_handler_t)(void *event_ctx);
+```
+
+Called synchronously on the comm/transport task context when a session is established or terminated. Must be non-blocking.
 
 #### `session_app_cmd_handler_t`
 
@@ -222,7 +241,10 @@ typedef session_err_t (*session_app_cmd_handler_t)(
 ```
 
 `len_out` enters as capacity (227) and leaves as bytes written; it must not
-exceed the capacity.  Non-OK returns do not end the session.
+exceed the capacity.  Application-level failures must be encoded in the
+plaintext response while returning `SESSION_OK`; non-OK returns are reserved
+for genuine internal failures and produce an empty encrypted payload with
+Transport status `0x90 0x00`.  Non-OK returns do not end the session.
 
 #### `session_peer_key_provider_t`
 

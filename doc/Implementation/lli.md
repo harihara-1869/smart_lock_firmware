@@ -9,15 +9,19 @@ byte-buffers and link status queries.
 
 ```
 ┌──────────────────────────┐
-│     Transport Layer      │  C-APDU parsing, state machine, crypto callbacks
+│   Application Module     │  dispatch / authorization / AAI (external peer)
+├──────────────────────────┤
+│      Session Layer       │  Mutual-auth handshake, AES-256-GCM, secure erase
+├──────────────────────────┤
+│     Transport Layer      │  state machine, C-APDU parsing, status words
 ├──────────────────────────┤
 │           LLI            │  ← this component
 ├──────────────────────────┤
-│   PN532 Command Layer    │  TgInitAsTarget, TgGetData, TgSetData, …
+│   PN532 Command Layer    │  NFC commands
 ├──────────────────────────┤
-│    PN532 Core Driver     │  Frame format, checksums, ACK, error recovery
+│    PN532 Core Driver     │  frame format, checksums
 ├──────────────────────────┤
-│   PN532 I2C Transport    │  I2C master, IRQ/polling, bus recovery
+│   PN532 I2C Transport    │  I2C master, IRQ/polling
 ├──────────────────────────┤
 │      ESP32-S3 (I2C)      │
 └──────────────────────────┘
@@ -123,8 +127,12 @@ Status byte mapping:
 | Anything else | `LLI_ERR_FRAME_INTEGRITY` | No |
 
 On any non-OK return, `*len_out` is zeroed before the function returns.  The
-PN532 handles MI-bit chaining internally — the LLI receives the fully
-reassembled payload.
+LLI intentionally bypasses the high-level `pn532_tg_get_data` wrapper because
+it needs the raw PN532 status byte.  MI-bit reassembly is implemented in the
+ESP32-side `pn532_cmd.c` wrapper, not in PN532 firmware; the current raw path
+is still safe because the protocol's maximum C-APDU is 261 bytes, while one
+`TgGetData` response carries 262 bytes, so chaining cannot occur under the
+current protocol limits.
 
 ### `lli_send_apdu`
 

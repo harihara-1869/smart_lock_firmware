@@ -94,6 +94,14 @@ typedef session_err_t (*session_app_cmd_handler_t)(
 typedef bool (*session_peer_key_provider_t)(
         size_t index, uint8_t pubkey_out[32], void *provider_ctx);
 
+/**
+ * Session lifecycle event handler — called synchronously on the transport
+ * task. Must be fast and non-blocking (no allocation, no blocking I/O).
+ *
+ * @param event_ctx  Opaque pointer from session_config_t.event_ctx.
+ */
+typedef void (*session_event_handler_t)(void *event_ctx);
+
 typedef struct {
     /* Local long-term identity (this lock's Ed25519 keypair).
      * local_sk: 64 bytes (seed 32 || public 32, libsodium layout).
@@ -107,6 +115,11 @@ typedef struct {
 
     session_app_cmd_handler_t app_handler;           /* required */
     void *app_handler_ctx;
+
+    /* Optional lifecycle event handlers (NULL-safe). */
+    session_event_handler_t on_established;  /* fires once: EPHEMERAL → ESTABLISHED */
+    session_event_handler_t on_terminated;   /* fires once: only if stage was ESTABLISHED at erase */
+    void *event_ctx;
 } session_config_t;
 
 typedef struct session_t *session_handle_t;
