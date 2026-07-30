@@ -219,6 +219,17 @@ No other file in the component includes a crypto library header.
 | `peer_key_provider_ctx` | `void *` | Passed to the provider |
 | `app_handler` | `session_app_cmd_handler_t` | Required. Plaintext command handler |
 | `app_handler_ctx` | `void *` | Passed to the handler |
+| `on_established` | `session_event_handler_t` | Optional. Callback when session reaches ESTABLISHED |
+| `on_terminated` | `session_event_handler_t` | Optional. Callback when ESTABLISHED session ends |
+| `event_ctx` | `void *` | Passed to event callbacks |
+
+#### `session_event_handler_t`
+
+```c
+typedef void (*session_event_handler_t)(void *event_ctx);
+```
+
+Called synchronously on the comm/transport task context when a session is established or terminated. Must be non-blocking.
 
 #### `session_app_cmd_handler_t`
 

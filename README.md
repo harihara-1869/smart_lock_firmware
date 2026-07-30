@@ -68,6 +68,7 @@ smart_lock_firmware/
 │   ├── Implementation/
 │   │   ├── Comms Module Master Reference Document.md
 │   │   │                              # Cross-layer architecture & API contract
+│   │   ├── comm_module.md             # Comm Module facade implementation & API reference
 │   │   ├── lli.md                     # LLI implementation details & API reference
 │   │   ├── transport.md               # Transport layer details & API reference
 │   │   └── session.md                 # Session layer details & API reference
@@ -97,16 +98,21 @@ smart_lock_firmware/
 │   │   │   └── transport.h            # Public API (no PN532 or LLI internals exposed)
 │   │   └── src/
 │   │       └── transport.c            # State machine, C-APDU parsing, secure session
-│   └── session/                       # Session layer (crypto, handshake, secure channel)
+│   ├── session/                       # Session layer (crypto, handshake, secure channel)
+│   │   ├── include/
+│   │   │   └── session.h              # Public API (implements transport callbacks)
+│   │   └── src/
+│   │       ├── session.c              # Handshake M1/M3, secure payloads, erase
+│   │       ├── session_crypto.h/.c    # Crypto seam (Ed25519, X25519, HKDF, AES-GCM)
+│   │       └── third_party/           # Vendored Monocypher 4.x (Ed25519)
+│   └── comm_module/                   # Communication Module Facade
 │       ├── include/
-│       │   └── session.h              # Public API (implements transport callbacks)
+│       │   └── comm_module.h          # Sole header exposed to Application Module
 │       └── src/
-│           ├── session.c              # Handshake M1/M3, secure payloads, erase
-│           ├── session_crypto.h/.c    # Crypto seam (Ed25519, X25519, HKDF, AES-GCM)
-│           └── third_party/           # Vendored Monocypher 4.x (Ed25519)
+│           └── comm_module.c          # Stack wiring, FreeRTOS comm task, mailbox handoff
 └── main/
     ├── CMakeLists.txt
-    └── smart_lock_firmware.c           # Application entry point / test harness
+    └── smart_lock_firmware.c           # Application entry point / smoke test harness
 ```
 
 ## Architecture
@@ -114,6 +120,8 @@ smart_lock_firmware/
 ```
 ┌──────────────────────────┐
 │   Application Module     │  Dispatch / authorization / AAI (external peer)
+├──────────────────────────┤
+│   Comm Module Facade     │  Single facade API (comm_module.h, mailbox handoff)
 ├──────────────────────────┤
 │      Session Layer       │  Mutual-auth handshake, AES-256-GCM, secure erase
 ├──────────────────────────┤
@@ -133,8 +141,8 @@ smart_lock_firmware/
 
 Each layer only knows about the one directly below it. The PN532 driver is
 transport-agnostic (vtable-based), the LLI exposes no PN532 types, the
-transport layer imports only `lli.h`, and the session layer imports only
-`transport.h`.
+transport layer imports only `lli.h`, the session layer imports only
+`transport.h`, and the Comm Module Facade encapsulates the stack into `comm_module.h`.
 
 ## Protocol Overview
 
@@ -164,6 +172,7 @@ Full specification: [doc/Specifications/smartlock_session_layer.pdf](doc/Specifi
 | LLI | [doc/Implementation/lli.md](doc/Implementation/lli.md) | Yes — works without transport layer |
 | Transport | [doc/Implementation/transport.md](doc/Implementation/transport.md) | Yes — works with stub crypto callbacks |
 | Session | [doc/Implementation/session.md](doc/Implementation/session.md) | Yes — works with stub peer provider / app handler |
+| Comm Module Facade | [doc/Implementation/comm_module.md](doc/Implementation/comm_module.md) | Unified facade & task mailbox handoff |
 | Master Reference | [doc/Implementation/Comms Module Master Reference Document.md](doc/Implementation/Comms%20Module%20Master%20Reference%20Document.md) | Cross-layer architecture & API contract |
 | Session spec | [doc/Specifications/smartlock_session_layer.pdf](doc/Specifications/smartlock_session_layer.pdf) | N/A |
 
@@ -177,26 +186,14 @@ usage example so you can use a single layer without the rest of the stack.
 - [x] Transport layer (mutual auth state machine, C-APDU parsing, secure session)
 - [x] Session layer (X25519 + Ed25519 handshake, HKDF key derivation, AES-256-GCM secure channel)
 - [x] Mutual authentication protocol specification
-- [ ] Communication module facade (wires Session + Transport + LLI + drivers behind one API)
-- [ ] Application module (command dispatch, authorization, lock actuation)
+- [x] Communication module facade (wires Session + Transport + LLI + drivers behind one API & task mailbox handoff)
+- [x] Application module (smoke test harness & mailbox contract implementation)
 
 ## Future Plans
 
-### Communication Module Facade
+### Production Application Module & ACL
 
-Single header (`comm_module.h`) that wires Session + Transport + LLI + drivers
-behind one config struct and exposes a minimal API for the Application Module:
-`comm_module_init`, `comm_module_run_once`, `comm_module_force_abort`.  The
-Application Module only includes `comm_module.h` — it never sees Transport, LLI,
-or PN532 internals.
-
-### Application Module
-
-Command dispatch and authorization layer that sits above the communication
-module.  Receives plaintext commands over the secure session, evaluates the
-phone's identity against an ACL, and triggers lock actuation.  The lock
-actuator control (motor/solenoid driver with debounce, timeout, and position
-feedback) lives inside this module.
+Full command dispatch, authorization policy evaluation, and lock actuation (motor/solenoid driver with position feedback and tamper response).
 
 ### Audit Log
 
