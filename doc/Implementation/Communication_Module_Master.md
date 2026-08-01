@@ -1,14 +1,15 @@
 # Communication Module — Master Reference
 
 **Scope:** PN532 I2C Transport → PN532 Core Driver → PN532 Command Layer → LLI
-→ Transport → Session → Comm Module Facade. The Application Module (lock
-state, motor control, tamper detection, sensor monitoring, business logic,
-authorization policy) is an external peer and its internals are out of
-scope here — §10 covers only the contract it must honor at the facade
-boundary. As of this revision, the facade (§8) hands commands and session
-events to the Application via a mailbox + task-notification handoff rather
-than direct callbacks, so that the Communication Module never executes
-application code on its own task.
+→ Transport → Session → Comm Module Facade → provisioning (§11). The
+Application Module (lock state, motor control, tamper detection, sensor
+monitoring, business logic, authorization policy — and, per §11, the
+Provision Secret, QR display, and authorized-key storage) is an external
+peer and its internals are out of scope here — §10 and §11 cover only the
+contract it must honor at the facade boundary. As of this revision, the
+facade (§8) hands commands and session events to the Application via a
+mailbox + task-notification handoff rather than direct callbacks, so that
+the Communication Module never executes application code on its own task.
 
 **Status of each layer**, per the current implementation:
 
@@ -23,11 +24,11 @@ application code on its own task.
 | Comm Module Facade | Built | `comm_module.md` |
 
 The current repository builds the PN532, LLI, Transport, Session, and Comm
-Module Facade layers, but does not yet provide the Application Module.  The
-Comm Module Facade (§8) is now built per `comm_module.md`; where the as-built
-code diverges from §8's design, the implementation is the source of truth.
-The firmware entry point is currently an LLI hardware test harness in
-`main/smart_lock_firmware.c`; it does not wire Session into Transport.
+Module Facade layers, but does not yet provide the production Application Module.
+The Comm Module Facade (§8) is built per `comm_module.md` and `comm_module.h`;
+where the as-built code diverges from §8's original design, the implementation is
+the source of truth. The firmware entry point in `main/smart_lock_firmware.c` exercises
+the full end-to-end stack by initializing the Comm Module Facade and running a smoke test application task.
 
 ---
 
@@ -42,7 +43,7 @@ The firmware entry point is currently an LLI hardware test harness in
 ┌───────────────────────────────┴───────────────────────────────────┐
 │                     COMMUNICATION MODULE                           │
 │                                                                     │
-│  comm_module.h  ◄── planned facade; not yet implemented            │
+│  comm_module.h  ◄── Communication Module facade (as built)          │
 │       │                                                             │
 │  ┌────┴─────────────────────────────────────────────────────┐     │
 │  │ Session (session.h/.c)                                    │     │
@@ -82,10 +83,9 @@ The firmware entry point is currently an LLI hardware test harness in
 
 **Rule that must hold at every seam:** a layer only calls the API of the
 layer immediately beneath it. Session never calls `lli_*` or `pn532_*`
-directly; Transport never calls `pn532_*` directly. The planned facade will
-be the only header exposed to the Application Module. This boundary is
-already true of the implemented layers and must be preserved when the
-facade is added.
+directly; Transport never calls `pn532_*` directly. The facade (`comm_module.h`) is
+the only header exposed to the Application Module. This boundary is preserved
+across all implemented layers.
 
 ---
 
@@ -594,7 +594,7 @@ not dispatched asynchronously.
 
 ---
 
-## 8. Comm Module Facade — implementation plan (not yet built)
+## 8. Comm Module Facade — as built
 
 ### 8.0 Where the IRQ actually is, and why the facade doesn't touch it
 
@@ -892,34 +892,33 @@ claim already works.
 - No interpretation of the plaintext OPCODE/ARGS envelope, and no exposure
   of the mailbox struct itself outside `comm_module.c` — the Application
   only ever sees `comm_module.h`'s accessor functions.
+- No secret storage, no display/UI ownership, and no persistent identity
+  store — including for provisioning (§11). The facade's only
+  provisioning-related surface is arming a one-shot handshake exception
+  and a deferred signature check; the secret, the QR rendering, and the
+  authorized-key list all live on the Application side of the boundary.
 
 ---
 
 ## 9. End-to-End Call Chain (implemented layers)
 
 ```
-Current firmware (`app_main`):
-  app_main → lli_init(test_cfg)
-    lli → pn532_i2c_create → pn532_init → pn532_wakeup
-    lli → pn532_get_firmware_version
-    lli → configure PN532 for ISO-DEP card emulation
-  test harness → lli_activate(...)
-    lli → pn532_tg_init_as_target(...)
-  test harness → lli_receive_apdu(...)
-    lli → pn532_send_command(TgGetData) → pn532_receive_response(...)
-  test harness → lli_send_apdu(...)
-    lli → pn532_tg_set_data(...)
-  test harness → lli_abort(...) → lli_deinit(...)
+Current firmware (`app_main` smoke test):
+  app_main → comm_module_init(&cfg)
+    comm_module → session_init → transport_init → lli_init → pn532_i2c_create → pn532_init
+  app_main → xTaskCreate(app_task)
+    app_task → comm_module_register_app_task(app_task_handle)
+    app_task → comm_module_start()
+      comm_module → xTaskCreate(comm_task_fn)
 ```
 
-The Session-enabled path described by the facade is not currently exercised
-by `app_main`. Once the facade exists, `comm_module_init` will construct a
-Session handle (registering the internal mailbox trampolines from §8.4 in
-place of the §7.4 seam's callbacks), register `session_on_apdu`/
-`session_on_erase` in a Transport configuration, and construct the Transport
-handle; `comm_module_start` will spawn the one FreeRTOS comm task that
+The Session-enabled path described by the facade is fully wired and exercised
+by `main/smart_lock_firmware.c`. `comm_module_init` constructs the Session handle
+(registering the internal mailbox trampolines from §8.4 in place of the §7.4 seam's callbacks),
+registers `session_on_apdu`/`session_on_erase` into the Transport configuration, and
+constructs the Transport handle; `comm_module_start` spawns the single FreeRTOS comm task that
 repeatedly calls `transport_run_session`. No new ISR is created anywhere in
-this wiring (§8.0). The resulting runtime path involves two tasks, not one:
+this wiring (§8.0). The resulting runtime path involves two tasks:
 
 ```
 Application:  creates its own task → comm_module_register_app_task(app_task)
@@ -1055,3 +1054,201 @@ task with anything that can block on `comm_module_*` calls.
 example above only calls facade functions. If a task ever needs something
 this header doesn't expose, that's a signal to extend the facade
 deliberately, not to reach around it.
+
+**Own provisioning end-to-end.** §11 covers this in full, but the short
+version for this section: the button press, the Provision Secret, the QR
+rendering, comparing the secret, and adding the new identity to the
+authorized-key store are all Application responsibilities, using the same
+mailbox path as every other command. Comms' role is limited to arming a
+one-shot handshake exception and a deferred signature check — nothing about
+provisioning should require the Application to touch `session.h` either.
+
+---
+
+## 11. Provisioning Mode (QR-Based) — corrected design
+
+This section evaluates and corrects a proposal to add QR-based phone
+provisioning, reusing the existing handshake rather than building a second
+one. The core idea is sound and adopted; two things in the original
+proposal are changed for reasons explained inline: (1) a runtime
+"verification disabled" mode is replaced with a deferred, single-shot
+signature check, so no code path exists anywhere that unconditionally
+skips Ed25519 verification, and (2) button/secret/QR/storage ownership is
+moved to the Application, matching every other ownership line in this
+document. Everything else — reusing Session/Transport, one packet format,
+requiring physical presence, a single-use secret, exiting the window after
+the first success — is unchanged from the original idea.
+
+### 11.1 Why "skip verification" doesn't survive review
+
+A mode switch that causes `crypto_ed25519_check` to never run is a
+standing authentication-bypass path, not a provisioning feature that
+happens to be gated by a button. Its risk doesn't scale with how well the
+button-press gating works — it scales with the mere fact that the branch
+exists at all, reachable by any future state-machine bug, race, or fault
+injection on the trigger GPIO, not just by the intended provisioning flow.
+Session already has no such branch today, and this design must not
+introduce one.
+
+It also under-specifies what the check *would* be verifying against: in
+normal operation, a resolver enumerates known long-term keys and M3's
+`Sig_P` is checked against each; during provisioning, by definition, the
+key being registered isn't in that list yet, so there is genuinely nothing
+to check `Sig_P` against **at the moment M3 arrives**. That's the real
+reason verification can't happen synchronously during the handshake — not
+a reason to skip it, but a reason to defer it until the claimed public key
+becomes known (which happens moments later, inside CMD_PROVISION).
+
+### 11.2 Corrected flow
+
+```
+Application: button press detected (App's own GPIO/sensor concern)
+Application: generates Provision Secret (any CSPRNG source), starts its own timeout
+Application: comm_module_arm_provisioning_window(timeout_ms)
+                — arms exactly one upcoming handshake to accept an unresolved
+                  identity; takes no secret, no key, no display concern
+Application: renders Provision Secret as a QR code on its own display peripheral
+
+Phone: scans QR, taps NFC, runs the identical M1/M2/M3 handshake
+Comms (Session): M1/M2 unchanged. At M3, because the window is armed,
+                 Session does NOT run the resolver loop — it caches
+                 Sig_P and the M3 transcript, unverified, and proceeds
+                 directly to SECURE_SESSION (fresh ephemeral keys/HKDF
+                 derivation happen exactly as normal — only the M3
+                 candidate-verification step is skipped, and only because
+                 there is nothing yet to verify it against)
+
+Phone → Lock (ordinary encrypted command, via the existing mailbox path,
+              §8 — Session does not parse this; it's opaque plaintext):
+    CMD_PROVISION { Provision Secret, Claimed Ed25519 Public Key }
+
+Application (in its own command handler, receiving this like any other
+             mailbox command):
+    1. comm_module_provision_verify_identity(claimed_pubkey)
+       — asks Comms to check the CACHED Sig_P/transcript from M3 against
+         this specific candidate key. Pure cryptographic fact-check, no
+         authorization judgment — same category of operation as the
+         existing AEAD tag check, and the only new Comms-side surface
+         this feature needs beyond arming the window.
+    2. Compare the received secret against its own copy, constant-time,
+       and confirm its own provisioning timeout hasn't elapsed.
+    3. Only if BOTH (1) and (2) succeed: add claimed_pubkey to its own
+       persistent authorized-key store, and disarm the provisioning
+       window (single-use — a second CMD_PROVISION, or a second phone
+       entirely, gets nothing without another deliberate button press).
+    4. Encode success/failure in the response payload as usual (§7.1's
+       contract note) — this is an ordinary application-level outcome,
+       not a Comms-level one.
+
+Next session: the Application's own `peer_key_provider` callback (already
+              backed by its own storage, per §7.2) enumerates the new key
+              automatically — no notification back to Comms is needed at
+              all, because Comms never held a copy of the identity store
+              to update in the first place.
+```
+
+###11.2.1 Provision Session Restrictions
+
+A Provision Session is **not** a general-purpose authenticated session.
+
+Although an encrypted channel has been established using the normal
+X25519 → HKDF → AES-256-GCM flow, the phone's long-term identity has not yet
+been verified. The M3 signature has been cached and will only be verified after
+the claimed public key is received.
+
+The Session layer SHALL continue to behave identically to a normal secure
+session. It SHALL decrypt incoming payloads and deliver the resulting plaintext
+to the Communication Module without interpreting application commands.
+
+The Communication Module SHALL continue to deliver decrypted messages to the
+Application Module using the normal mailbox interface. It SHALL NOT enforce
+Provision Mode restrictions.
+
+The Application Module owns the Provision Mode state, including the physical
+button state, the Provision Secret, and the provisioning workflow. Therefore,
+while Provision Mode is active, the Application Module SHALL accept only
+`CMD_PROVISION`.
+
+If any other application command is received during Provision Mode, the
+Application Module SHALL reject the command, terminate provisioning, request
+the Communication Module to terminate the session, and invoke the normal secure
+erase procedure.
+
+Only after:
+
+1. The Application validates the Provision Secret.
+2. The Application supplies the claimed phone public key.
+3. The Communication Module successfully verifies the cached M3 signature
+   against the supplied public key.
+4. The Application stores the new public key.
+
+is provisioning considered complete.
+
+The provisioning session SHALL then terminate normally.
+
+The newly provisioned identity becomes usable only during a subsequent
+connection, where it participates in the standard authenticated handshake.
+
+### 11.3 The two new facade functions, and nothing else
+
+```c
+// Arms exactly one upcoming session to skip resolver-based M3 verification
+// and instead cache Sig_P + the M3 transcript for a later deferred check.
+// Auto-disarms after the timeout or after one CMD_PROVISION-driven identity
+// is added, whichever the Application decides — Comms itself does not
+// track "was a key added"; it only tracks "is the window still armed" via
+// the timeout, and disarms immediately once a session using it completes
+// (successfully or not), so it is inherently single-session, not just
+// single-key. If the Application wants a hard single-key guarantee across
+// multiple connection attempts within the timeout, it enforces that itself
+// in step 3 above, not by re-arming.
+comm_err_t comm_module_arm_provisioning_window(uint32_t timeout_ms);
+
+// Verifies the CACHED (unverified-at-handshake-time) Sig_P from the most
+// recently completed provisioning-mode M3 against a caller-supplied
+// candidate public key. Returns true only if that specific key's
+// signature over the cached transcript is valid. This is a pure
+// crypto fact-check — it makes no judgment about secrets, timeouts, or
+// whether to trust the result; that judgment is entirely the caller's.
+bool comm_module_provision_verify_identity(const uint8_t claimed_pubkey[32]);
+```
+
+Everything else in the original proposal — the Provision Secret itself,
+generating it, rendering it as a QR code, comparing it, the persistent
+authorized-key store, the timeout that gates the *Application's* decision
+window (as opposed to Comms' single-session arming above) — stays entirely
+on the Application side, reachable only through the ordinary
+`comm_module.h` surface already described in §8 and §10. No new Session or
+Transport wire format, no new INS code, no new mailbox event type: `CMD_PROVISION`
+is just application-defined content inside the existing `command`/`response`
+byte arrays, exactly like any other opcode the Application chooses to define.
+
+### 11.4 Remaining points from the original proposal, confirmed or tightened
+
+- **Replay protection is not "subject to the protocol" — it's unconditional.**
+  Every session, provisioning or not, generates fresh ephemeral X25519 keys
+  and fresh `c_P`/`c_L` challenges (§7). Nothing about provisioning weakens
+  or depends on this; it doesn't need restating as a caveat.
+- **Single-use is a hard requirement, not an implication of the diagram.**
+  §11.3's window disarms after exactly one session, successful or not —
+  the Application must not re-arm automatically; a new provisioning
+  attempt requires a new deliberate button press.
+- **The 64-candidate resolver bound (§7.2) is the natural ceiling** on how
+  many identities provisioning can ever add — no separate limit is needed,
+  but it's worth the Application logging when it's approached, since
+  exhausting it silently degrades future M3 verification into "always
+  fails," not an obvious error.
+- **Provision Secret comparison must be constant-time** — ordinary secret-
+  comparison hygiene, unrelated to anything specific to this design.
+- **The button input deserves the same scrutiny as any other trust
+  boundary** — debounced, not remotely triggerable, and ideally logged or
+  otherwise surfaced to the owner when used, since it's the one physical
+  action this entire feature's security rests on. This is squarely the
+  Application's "tamper detection / sensor monitoring" territory (§1), not
+  a new Comms responsibility.
+- **The QR display's physical exposure is a deployment assumption, not a
+  protocol property**, and should be documented as one: if the display
+  showing the Provision Secret can be read or photographed by anyone other
+  than the intended installer at the moment of provisioning, the "physical
+  access required" guarantee this entire feature rests on is void
+  regardless of anything described above.

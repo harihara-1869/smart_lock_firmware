@@ -205,6 +205,25 @@ comm_err_t comm_module_get_command(uint8_t *buf, size_t buf_cap,
 void comm_module_complete_response(const uint8_t *response,
                                    size_t response_length);
 
+/**
+ * Arms exactly one upcoming session to skip resolver-based M3 verification
+ * and instead cache Sig_P + the M3 transcript for a later deferred check.
+ *
+ * @param timeout_ms  The validity window in milliseconds.
+ * @return COMM_OK or COMM_ERR_INTERNAL.
+ */
+comm_err_t comm_module_arm_provisioning_window(uint32_t timeout_ms);
+
+/**
+ * Verifies the CACHED (unverified-at-handshake-time) Sig_P from the most
+ * recently completed provisioning-mode M3 against a caller-supplied
+ * candidate public key.
+ *
+ * @param claimed_pubkey  The 32-byte Ed25519 public key claimed by the peer.
+ * @return true if the signature over the cached transcript is valid, false otherwise.
+ */
+bool comm_module_provision_verify_identity(const uint8_t claimed_pubkey[32]);
+
 #ifdef __cplusplus
 }
 #endif

@@ -24,6 +24,8 @@
 #include "freertos/task.h"
 
 #include "comm_module.h"
+#include "provision_mgr.h"
+#include "nvs_store.h"
 
 static const char *TAG = "APP";
 
@@ -104,6 +106,10 @@ static void app_task(void *arg)
     comm_module_start();
     ESP_LOGI(TAG, "Application task registered and comm_module started.");
 
+    /* Simulate provisioning button press for test */
+    ESP_LOGI(TAG, "Simulating physical button press to start provisioning...");
+    provision_mgr_arm(60000); /* 60 seconds */
+
     const TickType_t period = pdMS_TO_TICKS(50);
 
     while (1) {
@@ -129,15 +135,20 @@ static void app_task(void *arg)
 
                     uint8_t resp[227];
                     size_t resp_len = 0;
-                    if (cmd_len + 1 <= sizeof(resp)) {
-                        resp[0] = 0x00; /* Status OK */
-                        memcpy(&resp[1], cmd, cmd_len);
-                        resp_len = cmd_len + 1;
+                    
+                    if (provision_mgr_is_active()) {
+                        provision_mgr_handle_cmd(cmd, cmd_len, resp, &resp_len);
                     } else {
-                        ESP_LOGW(TAG, "Response would exceed buffer (%zu bytes); truncating", cmd_len + 1);
-                        resp[0] = 0x00;
-                        memcpy(&resp[1], cmd, sizeof(resp) - 1);
-                        resp_len = sizeof(resp);
+                        if (cmd_len + 1 <= sizeof(resp)) {
+                            resp[0] = 0x00; /* Status OK */
+                            memcpy(&resp[1], cmd, cmd_len);
+                            resp_len = cmd_len + 1;
+                        } else {
+                            ESP_LOGW(TAG, "Response would exceed buffer (%zu bytes); truncating", cmd_len + 1);
+                            resp[0] = 0x00;
+                            memcpy(&resp[1], cmd, sizeof(resp) - 1);
+                            resp_len = sizeof(resp);
+                        }
                     }
 
                     comm_module_complete_response(resp, resp_len);

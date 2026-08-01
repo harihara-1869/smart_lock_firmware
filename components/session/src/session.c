@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "session_crypto.h"
 
@@ -77,6 +78,13 @@ struct session_t {
     /* Derived session keys (present in ESTABLISHED stage only). */
     uint8_t k_p2e[SESSION_CRYPTO_GCM_KEY_LEN];
     uint8_t k_e2p[SESSION_CRYPTO_GCM_KEY_LEN];
+
+    /* Provisioning state */
+    bool    provisioning_armed;
+    int64_t provisioning_deadline_us;
+    bool    m3_cached;
+    uint8_t cached_sig_P[SESSION_CRYPTO_ED25519_SIG_LEN];
+    uint8_t cached_transcript[SESSION_TRANSCRIPT_LEN];
 };
 
 /* ------------------------------------------------------------------ */
@@ -184,19 +192,38 @@ static transport_err_t session_handle_m3(session_handle_t h,
      * accept the first one that verifies Sig_P against the transcript. */
     uint8_t candidate[SESSION_CRYPTO_ED25519_PK_LEN];
     bool authenticated = false;
-    for (size_t i = 0; i < SESSION_MAX_PEER_CANDIDATES; i++) {
-        if (!h->cfg.peer_key_provider(i, candidate,
-                                      h->cfg.peer_key_provider_ctx)) {
-            break;
-        }
-        if (session_crypto_ed25519_verify(candidate, transcript, tlen,
-                                          sig_P) == 0) {
+
+    if (h->provisioning_armed) {
+        h->provisioning_armed = false; /* Consumed */
+        if (esp_timer_get_time() <= h->provisioning_deadline_us) {
+            /* Skip resolver, cache the M3 */
+            memcpy(h->cached_sig_P, sig_P, sizeof(h->cached_sig_P));
+            memcpy(h->cached_transcript, transcript, sizeof(h->cached_transcript));
+            h->m3_cached = true;
             authenticated = true;
-            break;
+            ESP_LOGI(TAG, "M3: provisioning window used, authentication deferred");
+        } else {
+            ESP_LOGW(TAG, "M3: provisioning window expired");
+        }
+    }
+
+    if (!authenticated) {
+        for (size_t i = 0; i < SESSION_MAX_PEER_CANDIDATES; i++) {
+            if (!h->cfg.peer_key_provider(i, candidate,
+                                          h->cfg.peer_key_provider_ctx)) {
+                break;
+            }
+            if (session_crypto_ed25519_verify(candidate, transcript, tlen,
+                                              sig_P) == 0) {
+                authenticated = true;
+                break;
+            }
         }
     }
     session_crypto_zeroize(candidate, sizeof(candidate));
-    session_crypto_zeroize(transcript, sizeof(transcript));
+    if (!h->m3_cached) {
+        session_crypto_zeroize(transcript, sizeof(transcript));
+    }
 
     if (!authenticated) {
         ESP_LOGW(TAG, "M3: no candidate key verified the signature");
@@ -400,20 +427,42 @@ void session_on_erase(void *ctx)
     if (h->stage == SESSION_STAGE_ESTABLISHED && h->cfg.on_terminated) {
         h->cfg.on_terminated(h->cfg.event_ctx);
     }
+    if (h->stage == SESSION_STAGE_ESTABLISHED) {
+        if (h->cfg.on_terminated) {
+            h->cfg.on_terminated(h->cfg.event_ctx);
+        }
+    }
 
-    /* Idempotent: wiping already-zeroed memory is harmless, and always
-     * wiping (rather than gating on stage) guarantees no key material can
-     * leak through a half-completed handshake path.
-     *
-     * The long-term identity in cfg survives; everything session-scoped
-     * (ephemeral keys, challenges, transcript cache, derived keys) dies. */
+    /* Zeroize everything EXCEPT cfg and the provisioning state */
     session_crypto_zeroize(h->pk_eph_P, sizeof(h->pk_eph_P));
-    session_crypto_zeroize(h->c_P,      sizeof(h->c_P));
+    session_crypto_zeroize(h->c_P, sizeof(h->c_P));
     session_crypto_zeroize(h->pk_eph_L, sizeof(h->pk_eph_L));
     session_crypto_zeroize(h->sk_eph_L, sizeof(h->sk_eph_L));
-    session_crypto_zeroize(h->c_L,      sizeof(h->c_L));
-    session_crypto_zeroize(h->k_p2e,    sizeof(h->k_p2e));
-    session_crypto_zeroize(h->k_e2p,    sizeof(h->k_e2p));
+    session_crypto_zeroize(h->c_L, sizeof(h->c_L));
+    session_crypto_zeroize(h->k_p2e, sizeof(h->k_p2e));
+    session_crypto_zeroize(h->k_e2p, sizeof(h->k_e2p));
 
     h->stage = SESSION_STAGE_EMPTY;
+}
+
+session_err_t session_arm_provisioning_window(session_handle_t h, uint32_t timeout_ms)
+{
+    if (!h) {
+        return SESSION_ERR_INVALID_ARG;
+    }
+    h->provisioning_armed = true;
+    h->provisioning_deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    h->m3_cached = false;
+    session_crypto_zeroize(h->cached_sig_P, sizeof(h->cached_sig_P));
+    session_crypto_zeroize(h->cached_transcript, sizeof(h->cached_transcript));
+    return SESSION_OK;
+}
+
+bool session_provision_verify_identity(session_handle_t h, const uint8_t claimed_pubkey[32])
+{
+    if (!h || !h->m3_cached) {
+        return false;
+    }
+    return session_crypto_ed25519_verify(claimed_pubkey, h->cached_transcript,
+                                         SESSION_TRANSCRIPT_LEN, h->cached_sig_P) == 0;
 }

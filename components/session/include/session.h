@@ -158,6 +158,27 @@ transport_err_t session_on_apdu(const transport_capdu_t *capdu,
  */
 void session_on_erase(void *ctx);
 
+/**
+ * Arms exactly one upcoming session to skip resolver-based M3 verification
+ * and instead cache Sig_P + the M3 transcript for a later deferred check.
+ *
+ * @param h           The session handle.
+ * @param timeout_ms  The validity window in milliseconds.
+ * @return SESSION_OK or SESSION_ERR_INVALID_ARG.
+ */
+session_err_t session_arm_provisioning_window(session_handle_t h, uint32_t timeout_ms);
+
+/**
+ * Verifies the CACHED (unverified-at-handshake-time) Sig_P from the most
+ * recently completed provisioning-mode M3 against a caller-supplied
+ * candidate public key.
+ *
+ * @param h               The session handle.
+ * @param claimed_pubkey  The 32-byte Ed25519 public key claimed by the peer.
+ * @return true if the signature over the cached transcript is valid, false otherwise.
+ */
+bool session_provision_verify_identity(session_handle_t h, const uint8_t claimed_pubkey[32]);
+
 #ifdef __cplusplus
 }
 #endif

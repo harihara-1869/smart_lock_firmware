@@ -337,3 +337,16 @@ void comm_module_complete_response(const uint8_t *response,
 
     xTaskNotifyGive(g_comm_task);
 }
+
+comm_err_t comm_module_arm_provisioning_window(uint32_t timeout_ms)
+{
+    if (session_arm_provisioning_window(g_session, timeout_ms) != SESSION_OK) {
+        return COMM_ERR_INTERNAL;
+    }
+    return COMM_OK;
+}
+
+bool comm_module_provision_verify_identity(const uint8_t claimed_pubkey[32])
+{
+    return session_provision_verify_identity(g_session, claimed_pubkey);
+}

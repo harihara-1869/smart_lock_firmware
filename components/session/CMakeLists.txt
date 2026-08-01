@@ -14,4 +14,5 @@ idf_component_register(
         mbedtls
         esp_hw_support
         esp_common
+        esp_timer
 )
