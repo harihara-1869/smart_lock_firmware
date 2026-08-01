@@ -16,6 +16,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#ifndef MOCK_LLI_FOR_TESTING
+
 #include "lli.h"
 
 #include <stdlib.h>
@@ -403,3 +405,5 @@ lli_err_t lli_abort(lli_handle_t handle)
 
     return LLI_OK;
 }
+
+#endif /* MOCK_LLI_FOR_TESTING */

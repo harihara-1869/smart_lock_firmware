@@ -27,6 +27,10 @@
 #include "provision_mgr.h"
 #include "nvs_store.h"
 
+#ifdef MOCK_LLI_FOR_TESTING
+#include "test_integration.h"
+#endif
+
 static const char *TAG = "APP";
 
 /* ------------------------------------------------------------------ */
@@ -105,10 +109,6 @@ static void app_task(void *arg)
 
     comm_module_start();
     ESP_LOGI(TAG, "Application task registered and comm_module started.");
-
-    /* Simulate provisioning button press for test */
-    ESP_LOGI(TAG, "Simulating physical button press to start provisioning...");
-    provision_mgr_arm(60000); /* 60 seconds */
 
     const TickType_t period = pdMS_TO_TICKS(50);
 
@@ -227,4 +227,11 @@ void app_main(void)
     if (res != pdPASS) {
         ESP_LOGE(TAG, "Failed to create app_task");
     }
+
+#ifdef MOCK_LLI_FOR_TESTING
+    /* Let the app task initialize */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    xTaskCreate((TaskFunction_t)test_integration_run, "test_task", 4096, NULL, 5, NULL);
+#endif
 }

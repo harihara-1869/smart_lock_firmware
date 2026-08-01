@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "src/lli.c"
+        "src/lli_mock.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

@@ -1,49 +1,189 @@
 # Smart Lock Firmware
 
-ESP32-S3 firmware for an NFC-based smart lock. The lock emulates an ISO 14443-4
-Type A card via a PN532 controller over I2C. A mobile application taps the lock
-to authenticate and unlock.
+ESP32-S3 firmware for an NFC-based smart lock. The lock emulates an ISO 14443-4 Type A card via a PN532 controller over I2C. A companion mobile application taps the lock to perform mutual authentication, provision new phones via QR code scanning, and secure unlocking.
 
-This repository contains only the lock firmware. The companion mobile
-application (iOS / Android) is developed in a separate repository — a link will
-be provided once development is complete.
+## Companion Mobile Application
 
-## Hardware
+The companion mobile application (iOS / Android) is developed in a separate repository:
+👉 **[Smart Lock Mobile Application](https://github.com/harihara-1869/smart_lock_application)**
 
-| Component | Part | Interface |
-|-----------|------|-----------|
-| MCU | ESP32-S3 | — |
-| NFC frontend | PN532 | I2C (400 kHz) |
+---
 
-### Default GPIO mapping
+## Hardware Architecture
 
-| Signal | GPIO | Notes |
-|--------|------|-------|
-| SDA | 8 | I2C data |
-| SCL | 9 | I2C clock |
-| IRQ | 10 | PN532 → ESP32 (active-low). Set to `-1` for polling mode |
-| RST | 11 | PN532 reset (active-low). Set to `-1` if not wired |
+| Component | Part | Interface | Notes |
+|-----------|------|-----------|-------|
+| MCU | ESP32-S3 | — | Native FreeRTOS & ESP-IDF support |
+| NFC Frontend | PN532 | I2C (400 kHz) | Card emulation mode (ISO 14443-4 Type A) |
+| Display | E-Paper / E-Ink (Planned) | SPI (250x122) | Console ASCII QR fallback currently active |
 
-## Prerequisites
+### Default GPIO Mapping
 
-- **ESP-IDF v5.4.4** — [installation guide](https://docs.espressif.com/projects/esp-idf/en/v5.4.4/esp32s3/get-started/)
-- An ESP32-S3 development board
-- A PN532 breakout board wired to the ESP32-S3 via I2C
+| Signal | GPIO | Description |
+|--------|------|-------------|
+| SDA | 8 | I2C Data line |
+| SCL | 9 | I2C Clock line |
+| IRQ | 10 | PN532 → ESP32 (active-low interrupt line). Set `-1` for polling mode |
+| RST | 11 | PN532 Reset line (active-low). Set `-1` if unwired |
 
-## Building
+---
+
+## Architecture & Layering
+
+The codebase strictly enforces modular layer boundaries. Upper layers depend only on the public API of the layer directly beneath them.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Application Module                   │
+│   (Provision Manager, NVS Store, App Display, Commands) │
+├─────────────────────────────────────────────────────────┤
+│                   Comm Module Facade                    │
+│     (Single entry-point for App, Mailbox Handoff Task)  │
+├─────────────────────────────────────────────────────────┤
+│                      Session Layer                      │
+│ (Mutual-Auth Handshake, X25519/Ed25519, AES-256-GCM)   │
+├─────────────────────────────────────────────────────────┤
+│                     Transport Layer                     │
+│    (APDU State Machine, Framing, Secure Payload Router) │
+├─────────────────────────────────────────────────────────┤
+│                   Link Layer Interface                  │
+│       (ISO 14443-4 Card Emulation, Link Status, Mock)   │
+├─────────────────────────────────────────────────────────┤
+│                    PN532 Driver Layer                   │
+│        (Command Layer, Frame Parser, I2C Transport)     │
+├─────────────────────────────────────────────────────────┤
+│                     ESP32-S3 Hardware                   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Component Summary
+
+- **`app_module`**: Owns Application logic, provision state machine (`provision_mgr`), persistent key storage (`nvs_store`), and display abstraction (`app_display`).
+- **`comm_module`**: Unified facade encapsulating the lower protocol stack. Runs the main FreeRTOS comm task and manages mailbox handoffs.
+- **`session`**: Handles cryptographic handshake (X25519, Ed25519, HKDF-SHA256, AES-256-GCM) and identity verification caching.
+- **`transport`**: APDU state machine handling C-APDU/R-APDU parsing and encrypted payload routing.
+- **`lli`**: Link Layer Interface providing card emulation & APDU transceive abstraction. Supports compile-time mocking for integration testing.
+- **`pn532`**: Low-level PN532 chip driver over I2C with automatic bus recovery and IRQ/polling support.
+
+---
+
+## Provisioning Architecture (QR Code + Secret Verification)
+
+The smart lock features a secure, single-session QR-based phone provisioning mechanism:
+
+```
+┌──────┐                                 ┌──────┐                                ┌───────┐
+│ User │                                 │ Lock │                                │ Phone │
+└──┬───┘                                 └──┬───┘                                └───┬───┘
+   │  Press Provision Button                │                                        │
+   │───────────────────────────────────────>│                                        │
+   │                                        │ Generates 32B CSPRNG Secret            │
+   │                                        │ Displays QR Code / ASCII Output        │
+   │                                        │ Arms 60s Single-Session Window         │
+   │                                        │                                        │
+   │  Scans QR Code                         │                                        │
+   │────────────────────────────────────────────────────────────────────────────────>│
+   │                                        │                                        │
+   │                                        │  NFC Mutual Auth (M1 -> M2 -> M3)      │
+   │                                        │<──────────────────────────────────────>│
+   │                                        │  (Lock caches M3 signature &           │
+   │                                        │   defers identity verification)        │
+   │                                        │                                        │
+   │                                        │  Encrypted CMD_PROVISION               │
+   │                                        │<───────────────────────────────────────│
+   │                                        │  [0x01 | 32B Secret | 32B Phone PK]    │
+   │                                        │                                        │
+   │                                        │  Constant-time secret comparison       │
+   │                                        │  Verifies M3 signature with Phone PK   │
+   │                                        │  Persists Phone PK into NVS Store      │
+   │                                        │                                        │
+   │                                        │  Encrypted ACK (0x90 0x00)             │
+   │                                        │───────────────────────────────────────>│
+```
+
+1. **Arming Window**: When activated, `provision_mgr` generates a 32-byte (256-bit) cryptographically secure random Provision Secret via `esp_fill_random` and displays it.
+2. **Handshake Caching**: During an armed window, the `session` layer allows an unprovisioned phone to complete the M1->M2->M3 handshake by caching the phone's signature $Sig\_P$ and transcript, deferring identity validation.
+3. **Execution**: The phone sends an encrypted `CMD_PROVISION` payload over the AES-256-GCM secure session.
+4. **Verification & Storage**: `provision_mgr` validates the Provision Secret using constant-time comparison, verifies the phone's signature against its public key via `comm_module_provision_verify_identity`, and registers the phone's public key into `nvs_store`.
+
+---
+
+## Project Structure
+
+```
+smart_lock_firmware/
+├── CMakeLists.txt                      # Root build configuration
+├── doc/
+│   ├── Implementation/                 # Master references & component specifications
+│   │   ├── Communication_Module_Master.md
+│   │   ├── comm_module.md
+│   │   ├── lli.md
+│   │   ├── session.md
+│   │   └── transport.md
+│   └── Specifications/                 # PDF protocol specifications
+├── components/
+│   ├── app_module/                     # Application logic, provision manager, NVS
+│   ├── comm_module/                    # Communication module facade & task runner
+│   ├── session/                        # Session crypto, handshake, secure channel
+│   ├── transport/                      # Transport APDU state machine
+│   ├── lli/                            # Link Layer Interface (with mock support)
+│   ├── pn532/                          # PN532 driver over I2C
+│   └── test_utils/                     # Mock phone client for integration testing
+└── main/
+    ├── CMakeLists.txt
+    ├── smart_lock_firmware.c          # Application entry point
+    ├── test_integration.c              # Automated integration test runner
+    └── test_integration.h
+```
+
+---
+
+## Documentation
+
+Comprehensive documentation for the system architecture, component specifications, and protocol details is available in the [`doc/`](doc/) directory:
+
+### Implementation Guides (`doc/Implementation/`)
+
+| Document | Description |
+|----------|-------------|
+| [Communication_Module_Master.md](doc/Implementation/Communication_Module_Master.md) | **Master Reference**: Complete cross-layer architecture, state ownership, provisioning architecture, security invariants, and API contracts. |
+| [comm_module.md](doc/Implementation/comm_module.md) | Public API reference, facade implementation, and FreeRTOS task mailbox queue handoff. |
+| [session.md](doc/Implementation/session.md) | Cryptographic primitives (X25519, Ed25519, HKDF-SHA256, AES-256-GCM), handshake protocol, and provisioning cache. |
+| [transport.md](doc/Implementation/transport.md) | APDU state machine, command framing, C-APDU/R-APDU parsing, and session teardown lifecycle. |
+| [lli.md](doc/Implementation/lli.md) | Link Layer Interface details, card emulation parameters, and LLI mock interface. |
+
+### Component & Driver Docs
+
+- **PN532 Driver Docs**: Detailed driver architecture, I2C bus recovery mechanisms, and command references located in [`components/pn532/docs/`](components/pn532/docs/).
+
+### Protocol Specifications (`doc/Specifications/`)
+
+- **[smartlock_communication_module_spec.pdf](doc/Specifications/smartlock_communication_module_spec.pdf)**: Formal communication module protocol specification.
+
+---
+
+## Prerequisites & Building
+
+### Prerequisites
+
+- **ESP-IDF v5.4.4** — [Installation Guide](https://docs.espressif.com/projects/esp-idf/en/v5.4.4/esp32s3/get-started/)
+- ESP32-S3 Development Board
+- PN532 Breakout Board wired via I2C
+
+### Build Instructions
 
 ```bash
-# 1. Activate the ESP-IDF environment
+# 1. Export ESP-IDF environment
 source ~/esp/esp-idf/export.sh
 
-# 2. Set the target chip
+# 2. Set target chip
 idf.py set-target esp32s3
 
-# 3. Build
+# 3. Build firmware
 idf.py build
 ```
 
-## Flashing
+### Flashing & Monitoring
 
 Connect the ESP32-S3 via USB and run:
 
@@ -51,167 +191,28 @@ Connect the ESP32-S3 via USB and run:
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-Replace `/dev/ttyUSB0` with the correct serial port for your system. Press `Ctrl+]` to exit the monitor.
+*(Replace `/dev/ttyUSB0` with your target serial port. Press `Ctrl+]` to exit monitor)*
 
-To erase the entire flash before flashing:
+---
 
-```bash
-idf.py -p /dev/ttyUSB0 erase-flash
-```
+## Integration Testing
 
-## Project Structure
+The codebase includes an automated **Full Stack Integration Test Suite** that tests the entire protocol stack (Transport, Session, Comm Module, Provision Manager, NVS Store) without requiring physical NFC hardware.
 
-```
-smart_lock_firmware/
-├── CMakeLists.txt
-├── doc/
-│   ├── Implementation/
-│   │   ├── Comms Module Master Reference Document.md
-│   │   │                              # Cross-layer architecture & API contract
-│   │   ├── comm_module.md             # Comm Module facade implementation & API reference
-│   │   ├── lli.md                     # LLI implementation details & API reference
-│   │   ├── transport.md               # Transport layer details & API reference
-│   │   └── session.md                 # Session layer details & API reference
-│   └── Specifications/
-│       ├── smartlock_application_layer.pdf
-│       ├── smartlock_hardware_link_layer_pn532_spec.pdf
-│       ├── smartlock_session_layer.pdf
-│       └── smartlock_transport_layer.pdf
-├── components/
-│   ├── comm_module/                   # Application-facing communication facade
-│   ├── pn532/                         # PN532 NFC driver
-│   │   ├── include/
-│   │   │   ├── pn532.h                # Core driver API (transport-agnostic)
-│   │   │   ├── pn532_cmd.h            # Command layer (10 NFC commands)
-│   │   │   └── pn532_i2c.h            # I2C transport backend
-│   │   ├── src/
-│   │   │   ├── pn532.c                # Frame builder/parser, ACK, resync
-│   │   │   ├── pn532_cmd.c            # PN532 command wrappers
-│   │   │   └── pn532_i2c.c            # I2C bus lifecycle, IRQ/polling, bus recovery
-│   │   └── docs/                      # Driver documentation (6 files)
-│   ├── lli/                           # Link Layer Interface
-│   │   ├── include/
-│   │   │   └── lli.h                  # Public API (no PN532 types exposed)
-│   │   └── src/
-│   │       └── lli.c                  # Card emulation, APDU exchange, abort
-│   ├── transport/                     # Transport layer (mutual auth state machine)
-│   │   ├── include/
-│   │   │   └── transport.h            # Public API (no PN532 or LLI internals exposed)
-│   │   └── src/
-│   │       └── transport.c            # State machine, C-APDU parsing, secure session
-│   ├── session/                       # Session layer (crypto, handshake, secure channel)
-│   │   ├── include/
-│   │   │   └── session.h              # Public API (implements transport callbacks)
-│   │   └── src/
-│   │       ├── session.c              # Handshake M1/M3, secure payloads, erase
-│   │       ├── session_crypto.h/.c    # Crypto seam (Ed25519, X25519, HKDF, AES-GCM)
-│   │       └── third_party/           # Vendored Monocypher 4.x (Ed25519)
-│   └── comm_module/                   # Communication Module Facade
-│       ├── include/
-│       │   └── comm_module.h          # Sole header exposed to Application Module
-│       └── src/
-│           └── comm_module.c          # Stack wiring, FreeRTOS comm task, mailbox handoff
-└── main/
-    ├── CMakeLists.txt
-    └── smart_lock_firmware.c           # Application entry point / smoke test harness
-```
+### Running Integration Tests
 
-## Architecture
+Mocking is enabled by default via `add_compile_options(-DMOCK_LLI_FOR_TESTING=1)` in `CMakeLists.txt`.
 
-```
-┌──────────────────────────┐
-│   Application Module     │  Dispatch / authorization / AAI (external peer)
-├──────────────────────────┤
-│   Comm Module Facade     │  Single facade API (comm_module.h, mailbox handoff)
-├──────────────────────────┤
-│      Session Layer       │  Mutual-auth handshake, AES-256-GCM, secure erase
-├──────────────────────────┤
-│     Transport Layer      │  State machine, C-APDU parsing, secure session
-├──────────────────────────┤
-│           LLI            │  Card emulation, APDU I/O, link status, abort
-├──────────────────────────┤
-│   PN532 Command Layer    │  NFC commands (TgInitAsTarget, TgGetData, etc.)
-├──────────────────────────┤
-│    PN532 Core Driver     │  Frame format, checksums, ACK, error recovery
-├──────────────────────────┤
-│   PN532 I2C Transport    │  I2C master, IRQ/polling, bus recovery
-├──────────────────────────┤
-│      ESP32-S3 (I2C)      │
-└──────────────────────────┘
-```
+1. Flash the firmware to your board:
+   ```bash
+   idf.py -p /dev/ttyUSB0 flash monitor
+   ```
+2. The `test_task` will automatically spawn on boot, simulate a virtual phone client, execute the M1->M2->M3 handshake, transmit encrypted `CMD_PROVISION` payloads, and verify key persistence in NVS.
 
-Each layer only knows about the one directly below it. The PN532 driver is
-transport-agnostic (vtable-based), the LLI exposes no PN532 types, the
-transport layer imports only `lli.h`, the session layer imports only
-`transport.h`, and the Comm Module Facade encapsulates the stack into `comm_module.h`.
+To switch back to physical PN532 NFC hardware, remove `# Enable LLI Mocking` from the root `CMakeLists.txt`.
 
-## Protocol Overview
-
-The lock and phone perform a three-message mutual-authentication handshake
-over NFC, then exchange AES-256-GCM encrypted payloads:
-
-1. **M1 (Phone → Lock):** Phone sends its ephemeral X25519 public key and a
-   random challenge.
-2. **M2 (Lock → Phone):** Lock sends its ephemeral X25519 public key, its own
-   challenge, and an Ed25519 signature over the full transcript (domain-separated
-   as `"SLOCK-HS-v1" ‖ version ‖ pk_eph_P ‖ pk_eph_L ‖ c_P ‖ c_L`). The
-   phone verifies the lock's long-term identity.
-3. **M3 (Phone → Lock):** Phone sends an Ed25519 signature over the same
-   transcript. The lock verifies it against a list of provisioned public keys.
-
-Both sides derive AES-256-GCM session keys via HKDF-SHA-256 from the X25519
-shared secret and both challenges.  All session material is wiped on every
-teardown path (link loss, timeout, abort, or authentication failure).
-
-Full specification: [doc/Specifications/smartlock_session_layer.pdf](doc/Specifications/smartlock_session_layer.pdf)
-
-## Component Documentation
-
-| Component | Doc | Standalone? |
-|-----------|-----|-------------|
-| PN532 driver | `components/pn532/docs/` (6 files) | Yes — vtable-based, SPI/UART backends can be added |
-| LLI | [doc/Implementation/lli.md](doc/Implementation/lli.md) | Yes — works without transport layer |
-| Transport | [doc/Implementation/transport.md](doc/Implementation/transport.md) | Yes — works with stub crypto callbacks |
-| Session | [doc/Implementation/session.md](doc/Implementation/session.md) | Yes — works with stub peer provider / app handler |
-| Comm Module Facade | [doc/Implementation/comm_module.md](doc/Implementation/comm_module.md) | Unified facade & task mailbox handoff |
-| Master Reference | [doc/Implementation/Comms Module Master Reference Document.md](doc/Implementation/Comms%20Module%20Master%20Reference%20Document.md) | Cross-layer architecture & API contract |
-| Session spec | [doc/Specifications/smartlock_session_layer.pdf](doc/Specifications/smartlock_session_layer.pdf) | N/A |
-
-Each layer's documentation includes a complete API reference and a standalone
-usage example so you can use a single layer without the rest of the stack.
-
-## Current Status
-
-- [x] PN532 driver (I2C, IRQ + polling, bus recovery, vtable-based transport abstraction)
-- [x] Link Layer Interface (card emulation, APDU exchange, abort)
-- [x] Transport layer (mutual auth state machine, C-APDU parsing, secure session)
-- [x] Session layer (X25519 + Ed25519 handshake, HKDF key derivation, AES-256-GCM secure channel)
-- [x] Mutual authentication protocol specification
-- [x] Communication module facade (wires Session + Transport + LLI + drivers behind one API & task mailbox handoff)
-- [x] Application module (smoke test harness & mailbox contract implementation)
-
-## Future Plans
-
-### Production Application Module & ACL
-
-Full command dispatch, authorization policy evaluation, and lock actuation (motor/solenoid driver with position feedback and tamper response).
-
-### Audit Log
-
-Persistent log of successful and failed authentication attempts, stored in
-NVS with timestamps and phone key IDs.  Accessible over the NFC session or
-a future BLE companion channel.
-
-### BLE Companion Channel
-
-Out-of-band BLE channel for key provisioning, session auditing, and firmware
-update delivery.  Complements the NFC channel for scenarios where NFC tap
-proximity is inconvenient.
+---
 
 ## License
 
-Smart Lock Firmware is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later).
-
-Copyright (C) 2026 Harihara
-
-See the LICENSE file for the full license text.
+Copyright (C) 2026 Harihara. Licensed under the [GNU General Public License v3.0](licence).

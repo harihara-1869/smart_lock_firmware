@@ -11,6 +11,7 @@ void provision_mgr_arm(uint32_t timeout_ms);
 bool provision_mgr_is_active(void);
 void provision_mgr_handle_cmd(const uint8_t *cmd_bytes, size_t len,
                               uint8_t *resp_bytes, size_t *resp_len);
+const uint8_t* provision_mgr_get_secret(void);
 
 #ifdef __cplusplus
 }

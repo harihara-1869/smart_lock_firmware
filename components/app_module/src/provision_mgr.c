@@ -127,3 +127,8 @@ void provision_mgr_handle_cmd(const uint8_t *cmd_bytes, size_t len,
     s_provisioning_active = false;
     app_display_clear();
 }
+
+const uint8_t* provision_mgr_get_secret(void)
+{
+    return s_provision_secret;
+}
