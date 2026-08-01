@@ -24,7 +24,7 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
     mock_phone_get_m1(phone, m1);
 
     /* Send M1 (INS=0x10) */
-    uint8_t capdu_m1[5 + 64] = { 0x00, 0x10, 0x00, 0x00, 64 };
+    uint8_t capdu_m1[5 + 64] = { 0x80, 0x10, 0x00, 0x00, 64 };
     memcpy(&capdu_m1[5], m1, 64);
     lli_mock_push_rx(capdu_m1, sizeof(capdu_m1));
 
@@ -36,7 +36,9 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
         return;
     }
     if (rapdu_m2_len != 128 + 2 || rapdu_m2[128] != 0x90 || rapdu_m2[129] != 0x00) {
-        ESP_LOGE(TAG, "Test failed: invalid M2 response");
+        ESP_LOGE(TAG, "Test failed: invalid M2 response (len=%u, sw1=%02x, sw2=%02x)", 
+                 rapdu_m2_len, rapdu_m2_len > 0 ? rapdu_m2[rapdu_m2_len-2] : 0, rapdu_m2_len > 0 ? rapdu_m2[rapdu_m2_len-1] : 0);
+        vTaskDelete(NULL);
         return;
     }
 
@@ -48,7 +50,7 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
     }
 
     /* Send M3 (INS=0x11) */
-    uint8_t capdu_m3[5 + 64] = { 0x00, 0x11, 0x00, 0x00, 64 };
+    uint8_t capdu_m3[5 + 64] = { 0x80, 0x11, 0x00, 0x00, 64 };
     memcpy(&capdu_m3[5], m3, 64);
     lli_mock_push_rx(capdu_m3, sizeof(capdu_m3));
 
@@ -61,7 +63,8 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
     }
     
     if (rapdu_m3_ack_len != 2 || rapdu_m3_ack[0] != 0x90 || rapdu_m3_ack[1] != 0x00) {
-        ESP_LOGE(TAG, "Test failed: invalid M3 ACK: %02x%02x", rapdu_m3_ack[0], rapdu_m3_ack[1]);
+        ESP_LOGE(TAG, "Test failed: invalid M3 ACK: %02x%02x (len=%u)", rapdu_m3_ack[0], rapdu_m3_ack[1], rapdu_m3_ack_len);
+        vTaskDelete(NULL);
         return;
     }
     
@@ -79,7 +82,7 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
         mock_phone_encrypt_payload(phone, provision_payload, sizeof(provision_payload), encrypted, &encrypted_len);
 
         /* Send Secure Payload (INS=0x20) */
-        uint8_t capdu_sec[5 + 256] = { 0x00, 0x20, 0x00, 0x00, (uint8_t)encrypted_len };
+        uint8_t capdu_sec[5 + 256] = { 0x80, 0x20, 0x00, 0x00, (uint8_t)encrypted_len };
         memcpy(&capdu_sec[5], encrypted, encrypted_len);
         lli_mock_push_rx(capdu_sec, 5 + encrypted_len);
 
@@ -132,4 +135,5 @@ void test_integration_run(void *arg)
     }
     
     ESP_LOGI(TAG, "--- Integration Test Complete ---");
+    vTaskDelete(NULL);
 }
