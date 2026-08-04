@@ -444,6 +444,22 @@ late call after the bounded wait timed out), this is a no-op: it writes nothing
 and does not notify, so a stale notification cannot corrupt the next command's
 response. A `NULL`/zero-length response is delivered as an empty reply.
 
+#### `comm_module_arm_provisioning_window`
+
+```c
+comm_err_t comm_module_arm_provisioning_window(uint32_t timeout_ms);
+```
+
+Arms a temporary provisioning window on the underlying Session instance for `timeout_ms` milliseconds. Permits an unauthenticated peer to complete the M1-M3 handshake during initial lock setup by caching `Sig_P` and the transcript for deferred verification.
+
+#### `comm_module_provision_verify_identity`
+
+```c
+bool comm_module_provision_verify_identity(const uint8_t claimed_pubkey[32]);
+```
+
+Verifies the cached `Sig_P` signature over the handshake transcript against `claimed_pubkey`. Returns `true` if valid. Called by the Application Module after validating the Provision Secret during `CMD_PROVISION`.
+
 ---
 
 ## Known Limitations

@@ -90,9 +90,9 @@ the domain-separated transcript:
 Sig_P(64)
 ```
 
-The phone's Ed25519 signature over the same transcript.  Verified against
-each candidate key from the peer-key provider until one verifies or the
-list is exhausted.
+The phone's Ed25519 signature over the same transcript.  Verification depends on whether Provisioning Mode is armed:
+* **Normal Mode:** Verified against each candidate key returned by `peer_key_provider` until one verifies or the candidate list is exhausted.
+* **Provisioning Mode:** If `session_arm_provisioning_window` was called and the window deadline has not expired, immediate candidate enumeration is bypassed. `Sig_P` and the domain-separated transcript are cached inside `session_t`, `m3_cached` is set to `true`, and the handshake succeeds. The provisioning window is immediately disarmed after one session attempt.
 
 ### Key derivation (on M3 success)
 
@@ -104,6 +104,19 @@ K_e2p = HKDF-Expand(PRK, "esp->phone", 32)
 ```
 
 `SharedSecret` is zeroized immediately after derivation.
+
+## Provisioning Mode & Deferred Identity Verification
+
+During initial lock setup (provisioning), the phone's public key is not yet registered in NVS, so standard candidate enumeration would fail M3 authentication.
+
+To support secure zero-trust enrollment:
+1. The Application Module arms a temporary provisioning window via `session_arm_provisioning_window(h, timeout_ms)`.
+2. When M3 arrives within the active window, the Session layer caches `Sig_P` (64 bytes) and the complete `transcript` (140 bytes) inside the `session_t` instance, sets `m3_cached = true`, and permits session establishment without checking NVS.
+3. The phone sends an encrypted `CMD_PROVISION` payload containing the Provision Secret (display QR code value) and the phone's claimed Ed25519 public key.
+4. The Application Module verifies the Provision Secret, then invokes `session_provision_verify_identity(h, claimed_pubkey)`.
+5. `session_provision_verify_identity` performs an Ed25519 signature check of `claimed_pubkey` against `h->cached_sig_P` and `h->cached_transcript`. If valid, the Application Module commits `claimed_pubkey` to NVS and completes provisioning.
+
+This guarantees that even in provisioning mode, unauthenticated peers cannot inject arbitrary public keys into NVS unless they possess the private key corresponding to the `Sig_P` produced during the M1–M3 handshake.
 
 ## Secure Payloads
 
@@ -287,6 +300,22 @@ void session_on_erase(void *ctx);
 
 Register as `transport_config_t.on_erase`.  Idempotent secure erase of all
 session-scoped key material.
+
+#### `session_arm_provisioning_window`
+
+```c
+session_err_t session_arm_provisioning_window(session_handle_t h, uint32_t timeout_ms);
+```
+
+Arms a temporary provisioning window for `timeout_ms` milliseconds. When active, M3 authentication bypasses candidate key enumeration and caches `Sig_P` and the transcript for deferred verification.
+
+#### `session_provision_verify_identity`
+
+```c
+bool session_provision_verify_identity(session_handle_t h, const uint8_t claimed_pubkey[32]);
+```
+
+Verifies the cached `Sig_P` and transcript against `claimed_pubkey`. Returns `true` if valid.
 
 ## Standalone Usage
 
