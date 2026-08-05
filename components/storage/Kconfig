@@ -1,0 +1,32 @@
+menu "Storage"
+
+choice STORAGE_BACKEND
+    prompt "Storage backend"
+    default STORAGE_BACKEND_RAM
+    help
+        Selects the persistence backend behind the key_store / intent_log
+        seam. The Application Module talks ONLY to the interfaces in
+        key_store.h and intent_log.h — swapping the backend must never change
+        an application call site.
+
+        RAM is the provisional placeholder: it keeps the authorized-key list
+        and intent target in RAM only, exactly like the original nvs_store.c
+        array. It is honest about having no power-loss persistence.
+
+        The NVS backend and the secure-element + RAM + write-policy design
+        are planned and will be added to this choice when they land.
+
+    config STORAGE_BACKEND_RAM
+        bool "RAM placeholder (no persistence)"
+
+    # Planned — added with the NVS backend implementation:
+    # config STORAGE_BACKEND_NVS
+    #     bool "NVS flash backend"
+
+    # Planned — added with the secure-element + write-policy design:
+    # config STORAGE_BACKEND_SECURE_ELEMENT
+    #     bool "Secure element backend"
+
+endchoice
+
+endmenu

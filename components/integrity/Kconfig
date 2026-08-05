@@ -1,0 +1,39 @@
+menu "Integrity"
+
+choice INTEGRITY_BACKEND
+    prompt "Integrity backend"
+    default INTEGRITY_BACKEND_STUB
+    help
+        Selects the tamper/integrity sensor backend behind integrity.h.
+        The module samples and reports findings; policy (tamper lockout,
+        refusing authorization) stays in the Application.
+
+        STUB       : simulated sensor, always reports INTEGRITY_OK unless the
+                     sim-tamper flag is set. No hardware required.
+        TAMPER_GPIO: reads a real tamper switch. TODO(hardware): lands with
+                     the sensor.
+
+    config INTEGRITY_BACKEND_STUB
+        bool "Stub (simulated, no hardware)"
+
+    config INTEGRITY_BACKEND_TAMPER_GPIO
+        bool "Tamper switch (GPIO)"
+
+endchoice
+
+config INTEGRITY_PIN_TAMPER
+    int "Tamper switch GPIO"
+    default -1
+    depends on INTEGRITY_BACKEND_TAMPER_GPIO
+    help
+        Tamper switch input. -1 if not wired.
+
+config INTEGRITY_SIM_TAMPER
+    bool "Simulate tamper (stub backend only)"
+    default n
+    depends on INTEGRITY_BACKEND_STUB
+    help
+        When enabled, the stub reports INTEGRITY_TAMPER_DETECTED. Used to
+        exercise the Application's tamper-lockout policy without hardware.
+
+endmenu

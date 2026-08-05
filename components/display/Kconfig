@@ -1,0 +1,63 @@
+menu "Display"
+
+choice DISPLAY_BACKEND
+    prompt "Display backend"
+    default DISPLAY_BACKEND_CONSOLE
+    help
+        Selects which display backend is compiled behind the display.h
+        interface. The Application decides WHAT and WHEN to show; the backend
+        owns HOW it is rendered.
+
+        CONSOLE : logs semantic indications and renders the provisioning QR
+                  as ASCII/hex output. No hardware required.
+        PANEL   : SPI e-paper / e-ink panel (250x122, planned). TODO(hardware):
+                  implementation lands with the real panel.
+
+    config DISPLAY_BACKEND_CONSOLE
+        bool "Console (log output, no hardware)"
+
+    config DISPLAY_BACKEND_PANEL
+        bool "E-paper panel (SPI)"
+
+endchoice
+
+config DISPLAY_PIN_LED_GREEN
+    int "Green status LED GPIO"
+    default 14
+    help
+        Green LED used for success indication. -1 if not wired.
+
+config DISPLAY_PIN_LED_RED
+    int "Red status LED GPIO"
+    default 15
+    help
+        Red LED used for error indication. -1 if not wired.
+
+config DISPLAY_PIN_BUZZER
+    int "Buzzer/chime GPIO"
+    default 16
+    help
+        Buzzer output for success chime / error beeps. -1 if not wired.
+
+config DISPLAY_PIN_PANEL_CS
+    int "Panel chip-select GPIO"
+    default -1
+    depends on DISPLAY_BACKEND_PANEL
+    help
+        E-paper panel CS (SPI). -1 if not wired.
+
+config DISPLAY_PIN_PANEL_DC
+    int "Panel data/command GPIO"
+    default -1
+    depends on DISPLAY_BACKEND_PANEL
+    help
+        E-paper panel DC line. -1 if not wired.
+
+config DISPLAY_PIN_PANEL_RST
+    int "Panel reset GPIO"
+    default -1
+    depends on DISPLAY_BACKEND_PANEL
+    help
+        E-paper panel RST line. -1 if not wired.
+
+endmenu

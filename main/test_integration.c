@@ -6,7 +6,8 @@
 #include "freertos/task.h"
 #include "comm_module.h"
 #include "provision_mgr.h"
-#include "nvs_store.h"
+#include "app_cmd.h"
+#include "key_store.h"
 #include "mock_phone.h"
 #include "lli_mock.h"
 
@@ -73,7 +74,7 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
     if (is_provisioning) {
         /* Encrypt CMD_PROVISION payload */
         uint8_t provision_payload[65];
-        provision_payload[0] = 0x01; // CMD_PROVISION
+        provision_payload[0] = CMD_PROVISION;
         memcpy(&provision_payload[1], provision_mgr_get_secret(), 32);
         memcpy(&provision_payload[33], TEST_PHONE_PUBLIC_KEY, 32);
 
@@ -106,10 +107,15 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
             return;
         }
 
-        if (decrypted_len == 2 && decrypted[0] == 0x90 && decrypted[1] == 0x00) {
-            ESP_LOGI(TAG, "Provisioning Success!");
+        /* Per Application_Module_Master.md §3.1:
+         *   success: 0x00 ‖ LOCK_PK(32)  (33 bytes)
+         *   failure: 0x01                (1 byte)  */
+        if (decrypted_len == 1 + 32 && decrypted[0] == APP_STATUS_OK
+            && memcmp(&decrypted[1], TEST_LOCK_PUBLIC_KEY, 32) == 0) {
+            ESP_LOGI(TAG, "Provisioning Success! (lock PK echoed)");
         } else {
-            ESP_LOGE(TAG, "Provisioning Failed! Application Response: %02x", decrypted[0]);
+            ESP_LOGE(TAG, "Provisioning Failed! Application Response: %02x (len=%u)",
+                     decrypted[0], (unsigned)decrypted_len);
         }
     }
 }
@@ -128,10 +134,10 @@ void test_integration_run(void *arg)
     
     run_mock_phone_interaction(&phone, true);
     
-    if (nvs_store_is_key_authorized(TEST_PHONE_PUBLIC_KEY)) {
-        ESP_LOGI(TAG, "Key successfully stored in NVS.");
+    if (KeyStore_IsAuthorized(TEST_PHONE_PUBLIC_KEY)) {
+        ESP_LOGI(TAG, "Key successfully stored.");
     } else {
-        ESP_LOGE(TAG, "Test failed: key NOT stored in NVS.");
+        ESP_LOGE(TAG, "Test failed: key NOT stored.");
     }
     
     ESP_LOGI(TAG, "--- Integration Test Complete ---");

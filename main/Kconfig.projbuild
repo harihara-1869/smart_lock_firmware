@@ -1,0 +1,39 @@
+menu "Smart Lock Test Mode"
+
+choice SMART_LOCK_TEST_MODE
+    prompt "Application test mode"
+    default TEST_MODE_FULL_APPLICATION
+    help
+        Selects which harness app_main() runs.
+
+        FULL_APPLICATION  : production path — init every module in dependency
+                            order, spawn the Application task, and let it
+                            coordinate.
+        COMM_ONLY         : comm stack (PN532/LLI/Transport/Session/Facade)
+                            wired to a minimal echo/status Application loop.
+                            No actuator/display/integrity init.
+        ACTUATOR_ONLY     : AAI stub/backend exercised in isolation.
+        DISPLAY_ONLY      : Display peer exercised in isolation.
+        INTEGRITY_ONLY    : Integrity peer exercised in isolation.
+
+        Every mode must build; each harness initializes ONLY the modules it
+        needs.
+
+    config TEST_MODE_FULL_APPLICATION
+        bool "Full Application"
+
+    config TEST_MODE_COMM_ONLY
+        bool "Communication Module Only"
+
+    config TEST_MODE_ACTUATOR_ONLY
+        bool "Actuator Only"
+
+    config TEST_MODE_DISPLAY_ONLY
+        bool "Display Only"
+
+    config TEST_MODE_INTEGRITY_ONLY
+        bool "Integrity Only"
+
+endchoice
+
+endmenu

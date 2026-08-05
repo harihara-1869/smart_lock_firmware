@@ -1,0 +1,94 @@
+menu "Actuator"
+
+choice ACTUATOR_BACKEND
+    prompt "Actuator backend"
+    default ACTUATOR_BACKEND_STUB
+    help
+        Selects which actuator backend is compiled behind the AAI interface.
+        Exactly one is compiled; swapping is a config change, never an
+        interface change.
+
+        STUB  : honest simulated backend. Logs what it would do, simulates
+                motion with a timer, and never reports success for an action
+                it did not perform. This is the default for development and
+                for the single-module test harnesses.
+        RMT   : stepper driver via RMT (step/dir) — TODO(hardware): verify
+                pin wiring and motor driver requirements.
+        MCPWM : DC motor via MCPWM — TODO(hardware): verify pin wiring and
+                motor driver requirements.
+
+    config ACTUATOR_BACKEND_STUB
+        bool "Stub (simulated, no hardware)"
+
+    config ACTUATOR_BACKEND_RMT
+        bool "RMT stepper backend"
+
+    config ACTUATOR_BACKEND_MCPWM
+        bool "MCPWM DC motor backend"
+
+endchoice
+
+config ACTUATOR_PIN_STEP
+    int "Step GPIO"
+    default 12
+    depends on ACTUATOR_BACKEND_RMT
+    help
+        Stepper STEP output (RMT backend).
+
+config ACTUATOR_PIN_DIR
+    int "Direction GPIO"
+    default 13
+    depends on ACTUATOR_BACKEND_RMT
+    help
+        Stepper DIR output (RMT backend).
+
+config ACTUATOR_PIN_PWM_A
+    int "PWM output A GPIO"
+    default 12
+    depends on ACTUATOR_BACKEND_MCPWM
+    help
+        H-bridge PWM output A (MCPWM backend).
+
+config ACTUATOR_PIN_PWM_B
+    int "PWM output B GPIO"
+    default 13
+    depends on ACTUATOR_BACKEND_MCPWM
+    help
+        H-bridge PWM output B (MCPWM backend).
+
+config ACTUATOR_PIN_LIMIT_LOCKED
+    int "Locked limit-switch GPIO"
+    default 4
+    help
+        Limit switch asserted when the bolt is fully LOCKED. -1 if not wired.
+
+config ACTUATOR_PIN_LIMIT_UNLOCKED
+    int "Unlocked limit-switch GPIO"
+    default 5
+    help
+        Limit switch asserted when the bolt is fully UNLOCKED. -1 if not wired.
+
+config ACTUATOR_PIN_STALL
+    int "Stall-detect GPIO"
+    default -1
+    help
+        Motor-driver stall-detection input. -1 if not wired (stall is then
+        inferred from limit-switch timeout).
+
+config ACTUATOR_MOVE_TIMEOUT_MS
+    int "Actuation timeout (ms)"
+    default 5000
+    range 100 60000
+    help
+        Maximum time to drive toward a limit switch before reporting a stall.
+
+config ACTUATOR_SIM_JAM
+    bool "Simulate a jam (stub backend only)"
+    default n
+    depends on ACTUATOR_BACKEND_STUB
+    help
+        When enabled, the stub transitions to AAI_STATE_JAMMED instead of
+        completing motion. Used to exercise the Application's auto-reversal
+        path without hardware.
+
+endmenu
