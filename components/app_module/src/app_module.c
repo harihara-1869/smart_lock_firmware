@@ -56,6 +56,7 @@
 #include "integrity.h"
 #include "intent_log.h"
 #include "key_store.h"
+#include "provision_button.h"
 #include "provision_mgr.h"
 
 static const char *TAG = "APP_MOD";
@@ -77,8 +78,7 @@ static uint8_t s_last_error = APP_LAST_ERROR_NONE;
 static uint8_t s_actuation_target = APP_LOCK_STATE_LOCKED; /* target state */
 static bool    s_actuation_pending = false;
 
-/* Debounced provisioning button state (see app_config / provision_mgr). */
-static bool s_button_pressed = false;
+/* Provision button is event-driven (ISR doorbell); no poll state here. */
 
 /* ------------------------------------------------------------------ */
 /* Peer-key provider (iterator over the key store)                     */
@@ -267,19 +267,22 @@ static void perform_integrity_checks(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Provisioning button (debounced poll)                                */
+/* Provision button (event-driven — ISR doorbell, no polling)          */
 /* ------------------------------------------------------------------ */
 
 static void provisioning_button_tick(void)
 {
-    /* TODO(hardware): real button GPIO + debounce. For now the button is
-     * simulated via a Kconfig-free compile-time default: provisioned by a
-     * host command in test harnesses, or a placeholder that never auto-fires
-     * here. The provisioning window is armed by the harness / integration
-     * test, not by an un-wired GPIO. */
-    if (s_button_pressed) {
-        s_button_pressed = false;
-        provision_mgr_arm(APP_PROVISION_WINDOW_MS);
+    /* The ISR fired (coalesced with any comm notification). Debounce +
+     * hold-to-arm runs here in task context; arm the window on a confirmed
+     * hold. This is the physical-presence gate for provisioning (§11). */
+    if (ProvisionButton_OnTaskNotified()) {
+        if (provision_mgr_is_active()) {
+            ESP_LOGW(TAG, "provisioning already active; ignoring button hold");
+        } else if (provision_mgr_arm(APP_PROVISION_WINDOW_MS)) {
+            Display_ShowIndication(DISPLAY_IND_PROVISIONING);
+        } else {
+            ESP_LOGE(TAG, "failed to arm provisioning window");
+        }
     }
 }
 
@@ -318,6 +321,12 @@ static void app_task(void *arg)
         return;
     }
 
+    /* Event-driven provision button: the ISR notifies THIS task. Init after
+     * the task handle exists so the doorbell has a valid target. */
+    if (ProvisionButton_Init(xTaskGetCurrentTaskHandle()) != PROV_BUTTON_OK) {
+        ESP_LOGW(TAG, "provision button unavailable — provisioning via button disabled");
+    }
+
     comm_module_start();
     ESP_LOGI(TAG, "app task registered; comm module started");
 
@@ -326,6 +335,11 @@ static void app_task(void *arg)
     while (1) {
         perform_integrity_checks();
         actuation_tick();
+
+        /* Provision button: evaluate the ISR-doorbell state every iteration.
+         * The ISR only records edges + notifies; the hold-elapsed check runs
+         * here on the bounded-wait cadence, so a held button arms even without
+         * a release edge. No polling of the pin happens anywhere. */
         provisioning_button_tick();
 
         if (ulTaskNotifyTake(pdTRUE, period)) {

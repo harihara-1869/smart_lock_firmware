@@ -3,6 +3,7 @@ idf_component_register(
         "src/app_module.c"
         "src/app_dispatch.c"
         "src/provision_mgr.c"
+        "src/provision_button.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

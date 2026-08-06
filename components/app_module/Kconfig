@@ -1,0 +1,34 @@
+menu "Application Module"
+
+config APP_PROVISION_BUTTON_GPIO
+    int "Provision button GPIO"
+    default 17
+    range -1 48
+    help
+        GPIO for the physical provision button (active-low, internal pull-up,
+        wired to GND on press). The press is event-driven via a GPIO ISR that
+        notifies the Application task — the CPU never polls the pin.
+
+        Hold the button for APP_PROVISION_BUTTON_HOLD_MS to arm the
+        provisioning window. Set to -1 to disable the button entirely.
+
+config APP_PROVISION_BUTTON_HOLD_MS
+    int "Provision button hold duration (ms)"
+    default 2000
+    range 100 10000
+    help
+        How long the button must be held before the provisioning window is
+        armed. A deliberate hold prevents accidental taps from arming it.
+        (Irrelevant when APP_PROVISION_BUTTON_GPIO is -1; kept always-defined
+        so the code compiles in the disabled configuration.)
+
+config APP_PROVISION_BUTTON_DEBOUNCE_MS
+    int "Provision button debounce (ms)"
+    default 30
+    range 1 200
+    help
+        Debounce window applied in task context after the ISR fires.
+        (Irrelevant when APP_PROVISION_BUTTON_GPIO is -1; kept always-defined
+        so the code compiles in the disabled configuration.)
+
+endmenu
