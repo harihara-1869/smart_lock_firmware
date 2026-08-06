@@ -75,6 +75,11 @@ typedef struct {
  * cold-boot state and its oscillator has started before probing. Applications
  * must NOT pre-release RST from main; this call owns it.
  *
+ * If SDA is found held LOW after the reset pulse (a wedged PN532 from a
+ * previous session can hold SDA across a reboot), the bus is bit-bang
+ * released (up to 9 SCL pulses + STOP) and the I2C controller resynced with
+ * i2c_master_bus_reset() before the probe.
+ *
  * @param[in]  cfg      Transport configuration (see @ref pn532_i2c_config_t).
  * @param[out] ops_out  Receives the transport vtable (copied by value; caller
  *                      may store it on the stack until passed to pn532_init).

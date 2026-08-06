@@ -81,6 +81,11 @@ typedef struct {
      * re-added identically during bus recovery. */
     i2c_device_config_t     dev_cfg;
 
+    /* Bus configuration is retained so the WHOLE bus can be torn down and
+     * recreated when the controller hardware state is stuck beyond
+     * i2c_master_bus_reset(). */
+    i2c_master_bus_config_t bus_cfg;
+
     int  irq_gpio;                      /* -1 => polling mode                */
     int  rst_gpio;                      /* -1 => no hardware reset           */
     int  sda_gpio;                      /* stored for bus recovery           */
@@ -99,6 +104,7 @@ typedef struct {
 
 static esp_err_t recover_i2c_bus(pn532_i2c_ctx_t *ctx);
 static esp_err_t rebuild_i2c_device(pn532_i2c_ctx_t *c);
+static esp_err_t rebuild_i2c_bus(pn532_i2c_ctx_t *c);
 esp_err_t pn532_i2c_reset_device(void *ctx, uint32_t pulse_ms, uint32_t settle_ms);
 
 /* ---- Mutex helpers ------------------------------------------------------ */
@@ -207,6 +213,13 @@ static esp_err_t pn532_i2c_write(void *ctx, const uint8_t *buf, size_t len)
         /* The controller may still be wedged even after a bus reset — recreate
          * the device handle and try once more. */
         if (err == ESP_ERR_INVALID_STATE && rebuild_i2c_device(c) == ESP_OK) {
+            err = i2c_master_transmit(c->dev, buf, len, PN532_XFER_TIMEOUT_MS);
+        }
+
+        /* Final escalation: the controller hardware state is stuck beyond
+         * i2c_master_bus_reset() (the FSM/bus-busy condition persists). Tear
+         * down and recreate the whole bus + device, then retry once. */
+        if (err == ESP_ERR_INVALID_STATE && rebuild_i2c_bus(c) == ESP_OK) {
             err = i2c_master_transmit(c->dev, buf, len, PN532_XFER_TIMEOUT_MS);
         }
     }
@@ -345,6 +358,60 @@ static esp_err_t pn532_i2c_wait_ready(void *ctx, uint32_t timeout_ms)
 #include "soc/gpio_reg.h"
 
 /**
+ * @brief Bit-bang release an SDA line held low by a stuck slave.
+ *
+ * Clocks up to 9 SCL pulses (NXP AN10609) until SDA releases, then issues a
+ * STOP condition. After this, the ESP-IDF I2C master controller MUST be reset
+ * with i2c_master_bus_reset() before any further bus traffic.
+ *
+ * @param ctx  I2C transport context.
+ * @return ESP_OK if SDA is high afterwards; ESP_FAIL if it stays low.
+ */
+static esp_err_t bitbang_release_sda(pn532_i2c_ctx_t *ctx)
+{
+    ESP_LOGW(TAG, "SDA stuck low, attempting bus recovery");
+
+    /* Configure SCL as output for bit-banging. */
+    gpio_set_direction(ctx->scl_gpio, GPIO_MODE_OUTPUT);
+    gpio_set_level(ctx->scl_gpio, 1);
+    esp_rom_delay_us(5);
+
+    /* Clock out up to 9 pulses, checking SDA after each rising edge. */
+    int level = 0;
+    for (int i = 0; i < 9; i++) {
+        gpio_set_level(ctx->scl_gpio, 0);
+        esp_rom_delay_us(50);
+        gpio_set_level(ctx->scl_gpio, 1);
+        esp_rom_delay_us(50);
+
+        level = gpio_get_level(ctx->sda_gpio);
+        if (level == 1) {
+            ESP_LOGI(TAG, "SDA released after %d SCL pulses", i + 1);
+            break;
+        }
+    }
+
+    /* Issue STOP: SCL high, SDA low → SDA high. */
+    gpio_set_direction(ctx->sda_gpio, GPIO_MODE_OUTPUT);
+    gpio_set_level(ctx->sda_gpio, 0);
+    esp_rom_delay_us(5);
+    gpio_set_level(ctx->scl_gpio, 1);
+    esp_rom_delay_us(5);
+    gpio_set_level(ctx->sda_gpio, 1);
+    esp_rom_delay_us(5);
+
+    /* Verify SDA is now high. */
+    gpio_set_direction(ctx->sda_gpio, GPIO_MODE_INPUT);
+    level = gpio_get_level(ctx->sda_gpio);
+    if (level != 1) {
+        ESP_LOGE(TAG, "bus recovery failed: SDA still low");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "I2C bus recovery successful");
+    return ESP_OK;
+}
+
+/**
  * @brief Recover from a wedged I2C bus and/or PN532 ISO-DEP state.
  *
  * Two independent failures must be handled:
@@ -365,8 +432,6 @@ static esp_err_t pn532_i2c_wait_ready(void *ctx, uint32_t timeout_ms)
  */
 static esp_err_t recover_i2c_bus(pn532_i2c_ctx_t *ctx)
 {
-    bool stuck = false;
-
     /* Check if SDA is actually stuck low. */
     gpio_set_direction(ctx->sda_gpio, GPIO_MODE_INPUT);
     int level = gpio_get_level(ctx->sda_gpio);
@@ -374,45 +439,10 @@ static esp_err_t recover_i2c_bus(pn532_i2c_ctx_t *ctx)
         ESP_LOGW(TAG, "bus not stuck (SDA high) — recovering anyway: the PN532 "
                       "may be wedged in a broken ISO-DEP state");
     } else {
-        stuck = true;
-        ESP_LOGW(TAG, "SDA stuck low, attempting bus recovery");
-
-        /* Configure SCL as output for bit-banging. */
-        gpio_set_direction(ctx->scl_gpio, GPIO_MODE_OUTPUT);
-        gpio_set_level(ctx->scl_gpio, 1);
-        esp_rom_delay_us(5);
-
-        /* Clock out up to 9 pulses, checking SDA after each rising edge. */
-        for (int i = 0; i < 9; i++) {
-            gpio_set_level(ctx->scl_gpio, 0);
-            esp_rom_delay_us(50);
-            gpio_set_level(ctx->scl_gpio, 1);
-            esp_rom_delay_us(50);
-
-            level = gpio_get_level(ctx->sda_gpio);
-            if (level == 1) {
-                ESP_LOGI(TAG, "SDA released after %d SCL pulses", i + 1);
-                break;
-            }
+        esp_err_t r = bitbang_release_sda(ctx);
+        if (r != ESP_OK) {
+            return r;
         }
-
-        /* Issue STOP: SCL high, SDA low → SDA high. */
-        gpio_set_direction(ctx->sda_gpio, GPIO_MODE_OUTPUT);
-        gpio_set_level(ctx->sda_gpio, 0);
-        esp_rom_delay_us(5);
-        gpio_set_level(ctx->scl_gpio, 1);
-        esp_rom_delay_us(5);
-        gpio_set_level(ctx->sda_gpio, 1);
-        esp_rom_delay_us(5);
-
-        /* Verify SDA is now high. */
-        gpio_set_direction(ctx->sda_gpio, GPIO_MODE_INPUT);
-        level = gpio_get_level(ctx->sda_gpio);
-        if (level != 1) {
-            ESP_LOGE(TAG, "bus recovery failed: SDA still low");
-            return ESP_FAIL;
-        }
-        ESP_LOGI(TAG, "I2C bus recovery successful");
     }
 
     /* After any manual line manipulation, resync the ESP-IDF I2C master
@@ -471,6 +501,60 @@ static esp_err_t rebuild_i2c_device(pn532_i2c_ctx_t *c)
         ESP_LOGE(TAG, "i2c_master_bus_add_device failed: %s", esp_err_to_name(err));
         return err;
     }
+    return ESP_OK;
+}
+
+/**
+ * @brief Tear down and recreate the ENTIRE I2C bus + device.
+ *
+ * Final escalation when even i2c_master_bus_reset() + rebuild_i2c_device()
+ * leave the controller stuck (every transmit returns ESP_ERR_INVALID_STATE —
+ * the hardware FSM/bus-busy state is unrecoverable in-place). Deleting and
+ * recreating the bus fully resets the I2C peripheral and all internal driver
+ * state, giving a clean start equivalent to i2c_new_master_bus().
+ *
+ * The caller must hold the bus mutex. On return c->bus and c->dev are fresh
+ * handles; the device is NOT probed here (the caller retries the transmit,
+ * which drives the address).
+ */
+static esp_err_t rebuild_i2c_bus(pn532_i2c_ctx_t *c)
+{
+    ESP_LOGW(TAG, "recreating entire I2C bus + device (final escalation)");
+
+    esp_err_t err;
+
+    /* Tear down device, then bus. */
+    if (c->dev != NULL) {
+        err = i2c_master_bus_rm_device(c->dev);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "i2c_master_bus_rm_device failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        c->dev = NULL;
+    }
+    if (c->bus != NULL) {
+        err = i2c_del_master_bus(c->bus);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "i2c_del_master_bus failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        c->bus = NULL;
+    }
+
+    /* Recreate bus + device with the retained configs. */
+    err = i2c_new_master_bus(&c->bus_cfg, &c->bus);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_new_master_bus (rebuild) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = i2c_master_bus_add_device(c->bus, &c->dev_cfg, &c->dev);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "i2c_master_bus_add_device (rebuild) failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "I2C bus + device recreated");
     return ESP_OK;
 }
 
@@ -596,6 +680,7 @@ esp_err_t pn532_i2c_create(const pn532_i2c_config_t *cfg,
             .enable_internal_pullup = true,  /* external pull-ups still recommended */
         },
     };
+    c->bus_cfg = bus_cfg;
     err = i2c_new_master_bus(&bus_cfg, &c->bus);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(err));
@@ -642,6 +727,32 @@ esp_err_t pn532_i2c_create(const pn532_i2c_config_t *cfg,
         err = pn532_i2c_reset_device(c, PN532_RST_PULSE_MS, PN532_RST_SETTLE_MS);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "reset pulse failed: %s", esp_err_to_name(err));
+            goto fail;
+        }
+    }
+
+    /* A wedged PN532 from a previous session can hold SDA low across a reboot
+     * (the ESP32 reset button does NOT reset the chip — RST is a GPIO). The RST
+     * pulse above clears the chip's ISO-DEP state, but if SDA is physically
+     * held low the probe below would time out. Check and bit-bang release it
+     * first, then resync the I2C controller, before probing.
+     *
+     * NOTE: do NOT reconfigure SDA here — the I2C driver owns it as
+     * GPIO_MODE_INPUT_OUTPUT_OD; switching it to plain GPIO_MODE_INPUT breaks
+     * the driver's ACK cycle and the probe fails with ESP_ERR_TIMEOUT even when
+     * the chip is healthy. SDA is already readable as INPUT_OUTPUT_OD. */
+    if (gpio_get_level(c->sda_gpio) == 0) {
+        ESP_LOGW(TAG, "SDA held low at boot — bit-bang releasing before probe");
+        err = bitbang_release_sda(c);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "boot-time SDA release failed: %s", esp_err_to_name(err));
+            goto fail;
+        }
+        /* Bit-banging desyncs the I2C controller; resync before the probe. */
+        err = i2c_master_bus_reset(c->bus);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "i2c_master_bus_reset failed after boot release: %s",
+                     esp_err_to_name(err));
             goto fail;
         }
     }

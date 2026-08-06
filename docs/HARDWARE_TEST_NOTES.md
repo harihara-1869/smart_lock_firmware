@@ -18,6 +18,20 @@ Summary of the landed fixes:
 3. **Fatal propagation (smart-lock side)** — `LLI_ERR_BUS_FATAL` →
    `TRANSPORT_ERR_BUS_FATAL` → the comm task logs once and exits instead of
    looping forever on `TRANSPORT: activate failed: 6`.
+4. **Boot-time SDA recovery** — `pn532_i2c_create` now checks SDA after the RST
+   pulse. If a wedged PN532 from a previous session is holding SDA LOW across a
+   reboot (the ESP32 reset button does NOT reset the chip — RST is a GPIO), the
+   bus is bit-bang released (up to 9 SCL pulses + STOP) and the I2C controller
+   resynced with `i2c_master_bus_reset()` before the probe. Fixes the
+   `probe device timeout` on reboot-after-wedge; no capacitor drain needed.
+5. **Full bus-rebuild escalation (final)** — the runtime wedge can leave the
+   ESP-IDF I2C controller's hardware FSM stuck in a way that survives
+   `i2c_master_bus_reset()` + device rebuild (every transmit returns
+   `ESP_ERR_INVALID_STATE`; the `i2c_ll_is_bus_busy()` condition persists).
+   `pn532_i2c_write` now escalates to **tearing down and recreating the entire
+   I2C bus + device** (`rebuild_i2c_bus`, using the bus config retained in the
+   context) before reporting the fatal error. This fully resets the I2C
+   peripheral and internal driver state.
 
 ---
 
