@@ -263,18 +263,22 @@ pn532_i2c_write():
   if recovery_failures >= PN532_RECOVERY_THRESHOLD:
     return ESP_ERR_INVALID_STATE        // fatal — stop retrying
 
-  recover_i2c_bus()                      // reset controller + chip
+  recover_i2c_bus()                      // Level 1: reset controller + chip
 
   err = i2c_master_transmit()            // retry once
   if err == ESP_ERR_INVALID_STATE:
-    rebuild_i2c_device()                 // rm + re-add the device handle
-    err = i2c_master_transmit()          // retry once more
+    rebuild_i2c_device()                 // Level 2: rm + re-add device handle
+    err = i2c_master_transmit()          // retry once
+
+  if err == ESP_ERR_INVALID_STATE:
+    rebuild_i2c_bus()                    // Level 3: recreate entire bus + device
+    err = i2c_master_transmit()          // retry final time
 
   if err != ESP_OK:
     recovery_failures++
     return err == ESP_ERR_INVALID_STATE ? ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT
 
-  recovery_failures = 0                  // healthy transaction resets the counter
+  recovery_failures = 0                  // healthy transaction resets counter
 ```
 
 **Note**: recovery is NOT called on every failed transaction — only after the full retry budget is exhausted. Consecutive failures are capped by `PN532_RECOVERY_THRESHOLD` (3); beyond that the transport reports a fatal `ESP_ERR_INVALID_STATE` so the application can stop retrying instead of looping forever.

@@ -71,3 +71,24 @@ All commands arrive decrypted from the Session Layer as plaintext. The Applicati
 * **Response:** `STATUS_BYTE (0x00 = Success)`
 * **Behavior:** Removes the target phone public key from NVS.
 
+## 4. Physical Provision Button Architecture (`provision_button.c` / `provision_button.h`)
+
+To gate provisioning behind physical presence, the lock includes a dedicated event-driven **Provision Button** driver.
+
+### 4.1 Architecture & Doorbell Pattern
+* **ISR & Task Doorbell:** Pressing the physical button triggers a falling-edge GPIO interrupt (`provision_button_isr`). The ISR performs non-blocking validation and sends a FreeRTOS task notification (`xTaskNotifyFromISR`) to the `app_task` event loop.
+* **Debounce Filtering:** Software debouncing (`APP_PROVISION_BUTTON_DEBOUNCE_MS`, default 50 ms) ignores spurious mechanical contact bounces.
+* **Press-and-Hold Threshold:** To prevent accidental arming, the user must hold the button for `APP_PROVISION_BUTTON_HOLD_MS` (default 3000 ms). If released prematurely, the event is discarded.
+* **Arming Action:** Upon reaching the hold threshold, `provision_mgr_arm_window()` is invoked:
+  1. Generates a fresh 32-byte CSPRNG Provision Secret via `esp_fill_random`.
+  2. Arms the Communication Module provisioning window for 60 seconds (`APP_PROVISION_WINDOW_MS`).
+  3. Renders the Provision Secret as an ASCII QR code via `Display_RenderQR`.
+
+### 4.2 Kconfig Parameters
+| Parameter | Default | Purpose |
+|---|---|---|
+| `CONFIG_APP_PROVISION_BUTTON_GPIO` | `0` (`-1` = disabled) | GPIO pin for active-low provision button |
+| `CONFIG_APP_PROVISION_BUTTON_HOLD_MS` | `3000` | Minimum press-and-hold duration (ms) |
+| `CONFIG_APP_PROVISION_BUTTON_DEBOUNCE_MS` | `50` | Hardware ISR debounce interval (ms) |
+
+

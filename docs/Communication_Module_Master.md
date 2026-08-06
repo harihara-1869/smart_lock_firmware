@@ -279,8 +279,10 @@ Link-status mapping (`lli_get_link_status`):
 | `PICC_RELEASED` (0x80) / `IDLE` (0x00) | `LLI_STATUS_RELEASED` |
 | I2C/bus error | `LLI_STATUS_ERROR` |
 
-`lli_abort`: ACK → `InRelease(Tg=0x00)` → `pn532_wakeup`, best-effort,
-always returns `LLI_OK`.
+`lli_abort`: Perform local driver state cleanup only (always returns `LLI_OK`).
+Unsolicited ACK and `InRelease` (`0x52`) were removed to prevent $\text{T}_{\text{osc\_start}}$
+bus wedging; target state is naturally overwritten by `SAMConfiguration` + `TgInitAsTarget`
+on the subsequent session activation loop.
 
 The LLI is implemented and is the only layer above the PN532 stack that
 exposes card-emulation operations. It validates the configured general and

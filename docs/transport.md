@@ -205,8 +205,10 @@ C-APDU handling:
 
 ### RELEASED
 
-Calls `lli_abort()`, resets state to IDLE, returns `TRANSPORT_OK` to the
-caller.
+Calls `lli_abort()` (local driver cleanup), sets state to IDLE, sets `session_just_ended = true`
+(triggering the 2000ms `POST_SESSION_SETTLE_MS` delay before the next `SAMConfiguration` + `TgInitAsTarget`),
+and returns `TRANSPORT_OK` to the caller. Normal phone disconnects/timeouts are classified as `LINK_LOST`
+events rather than hardware failures.
 
 ---
 

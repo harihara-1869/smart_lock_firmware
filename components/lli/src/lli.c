@@ -409,37 +409,20 @@ lli_err_t lli_abort(lli_handle_t handle)
         return LLI_ERR_INVALID_ARG;
     }
 
-    /* Step 1 — best-effort: send ACK to abort any in-progress command. */
-    esp_err_t err = pn532_send_ack(handle->pn532);
-    if (err != ESP_OK) {
-        ESP_LOGD(TAG, "pn532_send_ack (best-effort) failed: %s",
-                 esp_err_to_name(err));
-    }
+    ESP_LOGD(TAG, "lli_abort: Local driver cleanup");
 
-    /* Step 2 — best-effort: release all targets (InRelease, Tg=0x00). */
-    uint8_t rel_param = 0x00;
-    err = pn532_send_command(handle->pn532, 0x52, &rel_param, 1);
-    if (err != ESP_OK) {
-        ESP_LOGD(TAG, "InRelease send (best-effort) failed: %s",
-                 esp_err_to_name(err));
-    } else {
-        uint8_t resp[16];
-        size_t  resp_len = 0;
-        err = pn532_receive_response(handle->pn532,
-                                     resp, sizeof(resp), &resp_len, 1000);
-        if (err != ESP_OK) {
-            ESP_LOGD(TAG, "InRelease response (best-effort) failed: %s",
-                     esp_err_to_name(err));
-        }
-    }
-
-    /* Step 3 — chip may have entered Power Down after release; guarantee
-     * it is awake for the next lli_activate call. */
-    err = pn532_wakeup(handle->pn532);
-    if (err != ESP_OK) {
-        ESP_LOGD(TAG, "pn532_wakeup (best-effort) failed: %s",
-                 esp_err_to_name(err));
-    }
+    /* Architectural Refactor (Option B - Clean Minimal Teardown):
+     * 1. In PN532 Target mode (PICC card emulation), sending InRelease (0x52) is invalid
+     *    because 0x52 is an Initiator command (UM0701-02 §7.4.1). The PN532 is the target,
+     *    not the initiator.
+     * 2. Unconditionally sending an ACK (00 00 FF 00 FF 00) to an idle PN532 after a receive
+     *    operation has completed violates data-link framing and corrupts internal state.
+     * 3. When a phone disconnects, RF field collapse causes the PN532 to auto-enter sleep.
+     *    Attempting immediate I2C writes fails during T_osc_start (~2ms crystal spin-up).
+     * 4. The next lli_activate() call issues SAMConfiguration (0x14) and TgInitAsTarget (0x8C),
+     *    which naturally overwrites any previous target session state without requiring
+     *    an explicit bus teardown command to a sleeping chip.
+     */
 
     return LLI_OK;
 }

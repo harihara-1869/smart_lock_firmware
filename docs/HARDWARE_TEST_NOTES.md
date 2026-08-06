@@ -89,6 +89,13 @@ Summary of the landed fixes:
    in `lli_receive_apdu`: `0x0B` now maps to `LLI_ERR_LINK_RELEASED`, so the
    transport does a clean teardown + re-activate instead of entering the
    recovery path.
+9. **Architectural Teardown Refactor (`0x52 InRelease` & Unsolicited ACK Removal).**
+   Analysis of post-transaction teardown revealed that `lli_abort()` was calling `pn532_send_ack()` and `pn532_in_release()` (`0x52`), leading to PN532 timeout during field collapse and triggering the I2C recovery ladder.
+   - **Diagnosis:** Compounding failure of 3 protocol violations:
+     1) **$\text{T}_{\text{osc\_start}}$ Race:** RF field collapse triggers Auto Power Down. Writing I2C commands immediately requires ~2ms for crystal oscillator spin-up; sending `0x52` instantly resulted in I2C NACKs / frame drops.
+     2) **Unsolicited ACK:** Sending a 6-byte ACK frame to an idle PN532 after a receive completes violates data-link framing and corrupts state.
+     3) **Context Mismatch:** `InRelease` (`0x52`) is an Initiator command (UM0701-02 §7.4.1). In Target mode (`TgInitAsTarget`), the PN532 *is* the target; sending `0x52` is invalid.
+   - **Fix (Option B):** `lli_abort()` was refactored for local driver cleanup only (no `0x52`, no unsolicited ACK). Disconnects are classified as normal `LINK_LOST` events. The next `lli_activate()` call (`SAMConfiguration` `0x14` $\rightarrow$ `TgInitAsTarget` `0x8C`) naturally overwrites previous target session state after the 2000ms RF settlement delay.
 
 ---
 
@@ -338,14 +345,20 @@ ritual (the PN532 gets a real reset on every boot).
 - After Bug B, the only recovery is power-cycle + capacitor drain; a hard reset
   button press does NOT recover (PN532 RST is GPIO-driven, not on the EN rail).
 
-### 3.5 How to verify the fix
+### 3.6 Bug C — "PN532 failed to ACK 0x52 command" during session teardown
 
-- **Bug A:** flash → expect `PN532 detected on I2C bus at 0x24` on the FIRST
-  boot after a hard reset (no power-cycle, no drain).
-- **Bug B:** tap + pull phone away mid-exchange → expect recovery (SAM
-  re-configured and the 30 s `TgInitAsTarget` wait resumes) instead of the
-  `ESP_ERR_INVALID_STATE` loop.
-- Remove the `main/` workaround and confirm the stack still initialises clean.
+**Observed Symptom:** A session completes cleanly or times out. When `lli_abort()` was invoked to clean up, the `0x52` (`InRelease`) command failed with an I2C timeout, triggering the recovery ladder unnecessarily.
+
+**Diagnosis (3 Compounding Protocol Violations):**
+1. **$\text{T}_{\text{osc\_start}}$ Race Condition (Auto Power Down):** When the phone pulls away, RF field collapse causes the PN532 to auto-enter low-power sleep (UM0701-02 §3.1.3.5). The ESP32's I2C transaction wakes the chip, but the crystal oscillator needs ~2ms ($\text{T}_{\text{osc\_start}}$) to stabilize before accepting data. `lli_abort()` was writing `0x52` instantly without delay, causing I2C NACKs.
+2. **Unsolicited ACK:** `lli_abort()` was unconditionally sending `pn532_send_ack()` (`00 00 FF 00 FF 00`). Sending an ACK frame to an idle PN532 (after `lli_receive_apdu` has already completed) violates link framing and corrupts internal state.
+3. **Context Mismatch (`InRelease` 0x52):** `InRelease` (`0x52`) is an **Initiator command** (UM0701-02 §7.4.1). In Target mode (`TgInitAsTarget`), the PN532 *is* the target, not the initiator. Calling `0x52` in Target mode is invalid.
+
+**Fix (Option B - Clean Minimal Teardown):**
+- Refactored `lli_abort()` to perform local driver state cleanup only (no `0x52`, no unsolicited ACK).
+- Normal phone disconnects/timeouts are classified as `LINK_LOST` events. The transport state transitions to `RELEASED` $\rightarrow$ `IDLE`, wiped via `invoke_erase()`.
+- The 2000ms `POST_SESSION_SETTLE_MS` delay allows the RF field to fully collapse.
+- On the next `run_idle()`, `lli_activate()` executes `SAMConfiguration` (`0x14`) followed by `TgInitAsTarget` (`0x8C`), which naturally overwrites any previous target session state without touching the I2C bus during sleep.
 
 ---
 

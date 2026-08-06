@@ -158,16 +158,11 @@ ISO14443-4 behaviour — the reader has paused the session but not departed.
 
 ### `lli_abort`
 
-Best-effort teardown sequence.  Always returns `LLI_OK`.
+Performs local driver state cleanup only. Always returns `LLI_OK`.
 
-1. `pn532_send_ack` — abort any in-progress PN532 command.
-2. `InRelease` (0x52, Tg=0x00) — release all targets.  Sent through the raw
-   command layer because no high-level wrapper exists.
-3. `pn532_wakeup` — the chip may have entered Power-Down after the release;
-   this guarantees it is awake for the next `lli_activate` call.
-
-Steps 1 and 2 are best-effort: failures are logged at DEBUG but do not cause
-early return.
+* **Unsolicited ACK Removed:** Sending an ACK to an idle PN532 after a receive operation completes violates data-link framing and corrupts internal link state.
+* **`InRelease` (0x52) Removed:** `0x52` is an Initiator command (UM0701-02 §7.4.1) and is invalid in Target mode (`TgInitAsTarget`). Furthermore, writing to the bus during RF collapse caused $\text{T}_{\text{osc\_start}}$ (~2ms crystal spin-up) I2C NACKs.
+* **State Overwrite:** The next `lli_activate()` call issues `SAMConfiguration` (0x14) and `TgInitAsTarget` (0x8C), which naturally overwrites any previous target session state without requiring an explicit teardown command during sleep.
 
 ---
 
@@ -333,4 +328,4 @@ Query the current link state.  Returns `lli_link_status_t` directly.
 lli_err_t lli_abort(lli_handle_t handle);
 ```
 
-Best-effort teardown: ACK → InRelease → wakeup.  Always returns `LLI_OK`.
+Local driver state cleanup only (no bus teardown commands). Always returns `LLI_OK`.
