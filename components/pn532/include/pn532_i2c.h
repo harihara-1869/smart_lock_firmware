@@ -41,9 +41,13 @@ extern "C" {
  * @brief Cold-boot reset timing used by @ref pn532_i2c_create: RST is held LOW
  * for this long, then released HIGH and the oscillator is given this long to
  * stabilise before the bus probe.
+ *
+ * PN532_RST_SETTLE_MS is 250 (not 100): on a fast power-cycle after a wedge the
+ * PN532's power rail / oscillator can take longer than 100 ms to be reliably
+ * probe-able (observed `PN532 not found` right after a wedge + quick reboot).
  */
 #define PN532_RST_PULSE_MS   50
-#define PN532_RST_SETTLE_MS  100
+#define PN532_RST_SETTLE_MS  250
 
 /**
  * @brief I2C transport configuration.

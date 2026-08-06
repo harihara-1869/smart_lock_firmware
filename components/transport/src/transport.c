@@ -42,10 +42,17 @@ static const char *TAG = "TRANSPORT";
 
 #define PLAINTEXT_BUDGET    227  /* 255 - 12 (GCM nonce) - 16 (MAC tag) */
 
+/* Settling delay before re-initialising the NFC after a session ends. A
+ * session teardown (especially a phone pulling away mid-exchange) can leave
+ * the PN532 in a transitional RF state; re-running SAMConfiguration
+ * immediately can wedge it. Give the field a moment to settle first. */
+#define POST_SESSION_SETTLE_MS  2000
+
 struct transport_t {
     transport_config_t cfg;
     transport_state_t  state;
     lli_handle_t       lli;
+    bool               session_just_ended;  /* settle before next activate */
 };
 
 /* ------------------------------------------------------------------ */
@@ -197,6 +204,17 @@ transport_state_t transport_get_state(transport_handle_t handle)
 
 static transport_err_t run_idle(transport_handle_t h)
 {
+    /* A session just ended: give the PN532 a settling delay before the next
+     * SAMConfiguration/activate so the RF field is fully quiescent. Without
+     * this, re-initialising immediately after a teardown (especially a phone
+     * pulling away mid-exchange) can wedge the chip. */
+    if (h->session_just_ended) {
+        ESP_LOGI(TAG, "session ended — settling %d ms before NFC re-init",
+                 POST_SESSION_SETTLE_MS);
+        vTaskDelay(pdMS_TO_TICKS(POST_SESSION_SETTLE_MS));
+        h->session_just_ended = false;
+    }
+
     lli_err_t err = lli_activate(h->lli, h->cfg.activate_timeout_ms);
     if (err == LLI_ERR_TIMEOUT) {
         ESP_LOGD(TAG, "activate timeout");
@@ -490,6 +508,9 @@ transport_err_t transport_run_session(transport_handle_t handle)
         case TRANSPORT_STATE_RELEASED:
             lli_abort(handle->lli);
             handle->state = TRANSPORT_STATE_IDLE;
+            /* A session ran and ended — the next run_idle should settle
+             * before re-initialising the NFC. */
+            handle->session_just_ended = true;
             return TRANSPORT_OK;
         }
     }

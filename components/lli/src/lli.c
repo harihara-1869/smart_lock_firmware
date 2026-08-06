@@ -329,6 +329,18 @@ lli_err_t lli_receive_apdu(lli_handle_t handle, uint8_t *buf, size_t buf_len,
             ESP_LOGW(TAG, "TgGetData status=0x29 (target released)");
             return LLI_ERR_LINK_RELEASED;
         }
+        if (status == 0x0B) {
+            /* 0x0B = PN532_ERR_RF_PROTOCOL: the peer's RF communication was
+             * interrupted (e.g. Android polling its NFC antenna for nearby
+             * readers right after the app closes, or the phone pulling away
+             * mid-exchange). This is a normal, transient peer-side condition —
+             * semantically the same as target-released — NOT a frame-integrity
+             * fault. Treating it as LINK_RELEASED lets the transport do a clean
+             * teardown + re-activate instead of escalating into the recovery
+             * ladder (which was a wedge trigger). */
+            ESP_LOGW(TAG, "TgGetData status=0x0B (RF protocol — peer poll/teardown)");
+            return LLI_ERR_LINK_RELEASED;
+        }
         ESP_LOGW(TAG, "TgGetData status=0x%02X (frame integrity)", status);
         return LLI_ERR_FRAME_INTEGRITY;
     }

@@ -32,6 +32,63 @@ Summary of the landed fixes:
    I2C bus + device** (`rebuild_i2c_bus`, using the bus config retained in the
    context) before reporting the fatal error. This fully resets the I2C
    peripheral and internal driver state.
+6. **UX: phone-left-on-pad no longer crashes the system.** A phone left on the
+   pad mid-teardown produces a transient wedge: the recovery ladder clears the
+   bus, but the session still aborts. Previously the first such fatal stopped
+   the comm task and rebooted. Now:
+   - `pn532_i2c_write` returns **`ESP_ERR_TIMEOUT` (transient)** while the
+     recovery ladder is still making progress (a successful recovery resets the
+     counter; the session loop re-activates and waits for a reader).
+   - After `PN532_RECOVERY_FAIL_LIMIT` (3) consecutive post-recovery transmit
+     failures — the chip is unresponsive despite recovery, i.e. genuinely dead
+     (only a power cycle clears it) — the write returns fatal
+     `ESP_ERR_INVALID_STATE`.
+   - The comm task tolerates up to `COMM_FATAL_RETRY_LIMIT` (3) consecutive
+     fatal bus errors, retrying the session each time; a normal session cycle
+     resets the counter. Only a persistently dead bus stops the task.
+
+   **Observed failure mode (2026-08-06):** a chip that dies after a
+   phone-left-on-pad produced an INFINITE recovery loop (`TRANSPORT: activate
+   failed: 6` every ~260 ms) when the write always returned transient TIMEOUT.
+   The `PN532_RECOVERY_FAIL_LIMIT` counter fixes this: 3 failed recoveries →
+   fatal → comm task stops cleanly instead of hammering a dead chip forever.
+   The distinction is now: transient (recovery works, next transmit succeeds)
+   vs dead chip (3 consecutive post-recovery failures → fatal).
+7. **Post-session NFC settle delay (2000 ms).** A session teardown — especially
+   a phone pulling away mid-exchange — can leave the PN532 in a transitional
+   RF/ISO-DEP state. Re-running SAMConfiguration immediately after `SESSION
+   ENDED` would talk to a chip that is still settling, which was a trigger for
+   the wedge (§2b). The transport now inserts a `POST_SESSION_SETTLE_MS`
+   (2000 ms) delay between `SESSION ENDED` and the next NFC re-init
+   (`SAM configured`): the `RELEASED` state sets a `session_just_ended` flag,
+   and the next `run_idle` sleeps 2 s before `lli_activate`. The first boot and
+   plain activate-timeouts (no session) are unaffected.
+
+   **Why it was needed (the failure it prevents):** the observed teardown
+   sequence on real hardware was:
+   ```
+   SESSION ENDED (advisory)
+   SAM configured                 ← immediately, chip still settling
+   TgInitAsTarget: activated
+   TgGetData status=0x13/0x0B     ← corrupt frame
+   write failed ... recovery ladder ... (wedge spiral)
+   ```
+   The phone's RF field collapses as it pulls away; the PN532's ISO-DEP state
+   machine is mid-frame when the lock re-initialises it. The 2 s gap lets the
+   field fully quiesce and the chip return to a clean IDLE before the next
+   SAMConfiguration, removing the immediate re-init from the wedge trigger set.
+   The delay is bounded and only on the session-end path, so it does not slow
+   steady-state idle polling.
+8. **`0x0B` RF-protocol status = benign link-release, not a fault.** Every wedge
+   log showed `TgGetData status=0x0B` right after a session teardown. `0x0B` is
+   `PN532_ERR_RF_PROTOCOL` (peer's RF communication interrupted — e.g. Android
+   polling its NFC antenna for nearby readers after the app closes). It is a
+   normal, transient peer-side condition, semantically the same as `0x29`
+   (target released). It was being caught by the `LLI_ERR_FRAME_INTEGRITY`
+   catch-all, which escalated into the recovery ladder (a wedge trigger). Fixed
+   in `lli_receive_apdu`: `0x0B` now maps to `LLI_ERR_LINK_RELEASED`, so the
+   transport does a clean teardown + re-activate instead of entering the
+   recovery path.
 
 ---
 

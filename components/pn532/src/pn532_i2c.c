@@ -61,14 +61,13 @@ static const char *TAG = "PN532";
 /* IRQ line is active-low: level 0 means "frame ready / IRQ asserted". */
 #define PN532_IRQ_ASSERTED_LEVEL 0
 
-/* Cold-boot reset timing: RST is pulsed LOW then released HIGH, and we wait
- * for the oscillator (T_osc_start) before probing the bus. */
-#define PN532_RST_PULSE_MS      50
-#define PN532_RST_SETTLE_MS     100
-
-/* Consecutive failed bus recoveries after which the transport reports a fatal
- * ESP_ERR_INVALID_STATE instead of continuing to retry a dead bus. */
-#define PN532_RECOVERY_THRESHOLD 3
+/* Number of consecutive post-recovery transmit failures after which the
+ * transport reports a fatal ESP_ERR_INVALID_STATE. A recovery that clears the
+ * bus but is followed by a transmit that STILL fails means the chip itself is
+ * unresponsive (only a power cycle clears it) — retrying forever just hammers
+ * a dead bus. A transient condition (e.g. phone mid-teardown) resets the
+ * counter the moment a transmit succeeds. */
+#define PN532_RECOVERY_FAIL_LIMIT 3
 
 /* ---- Transport context -------------------------------------------------- */
 
@@ -97,7 +96,8 @@ typedef struct {
     uint32_t poll_interval_ms;
     uint32_t poll_max_retries;
 
-    uint32_t recovery_failures;         /* consecutive failed recoveries     */
+    uint32_t recovery_failures;         /* consecutive post-recovery transmit
+                                         * failures (fatal after the limit)   */
 } pn532_i2c_ctx_t;
 
 /* ---- Forward declarations ----------------------------------------------- */
@@ -164,10 +164,11 @@ static void IRAM_ATTR pn532_irq_isr(void *arg)
  * exchange, so we retry up to PN532_WRITE_MAX_RETRIES with a short delay.
  *
  * When the retry budget is exhausted the bus is recovered (see recover_i2c_bus)
- * and the write is retried. If the controller remains wedged the I2C device
- * handle is recreated once more. Only after all of that does the write report a
- * fatal ESP_ERR_INVALID_STATE (after PN532_RECOVERY_THRESHOLD consecutive failed
- * recoveries) so the caller can stop retrying instead of looping forever.
+ * and the write is retried, escalating through a device-handle rebuild and a
+ * full bus + device recreation. If recovery itself fails to clear the bus the
+ * write reports a fatal ESP_ERR_INVALID_STATE so the caller stops retrying; if
+ * recovery cleared the bus but the transmit still failed, ESP_ERR_TIMEOUT is
+ * returned (a transient condition — the caller should retry the session).
  */
 static esp_err_t pn532_i2c_write(void *ctx, const uint8_t *buf, size_t len)
 {
@@ -197,17 +198,18 @@ static esp_err_t pn532_i2c_write(void *ctx, const uint8_t *buf, size_t len)
     ESP_LOGW(TAG, "write failed after %d retries, attempting bus recovery",
              PN532_WRITE_MAX_RETRIES);
 
-    if (c->recovery_failures >= PN532_RECOVERY_THRESHOLD) {
+    if (c->recovery_failures >= PN532_RECOVERY_FAIL_LIMIT) {
         bus_unlock(c);
-        ESP_LOGE(TAG, "bus recovery limit reached (%u consecutive failures); "
-                      "reporting fatal error", (unsigned)c->recovery_failures);
+        ESP_LOGE(TAG, "recovery failure limit reached (%u); reporting fatal",
+                 (unsigned)c->recovery_failures);
         return ESP_ERR_INVALID_STATE;
     }
 
     /* Attempt bus recovery before giving up. */
     esp_err_t recovery_err = recover_i2c_bus(c);
     if (recovery_err == ESP_OK) {
-        /* One retry after recovery. */
+        /* Recovery cleared the bus (hardware reset + controller resync + bus
+         * rebuild as needed). */
         err = i2c_master_transmit(c->dev, buf, len, PN532_XFER_TIMEOUT_MS);
 
         /* The controller may still be wedged even after a bus reset — recreate
@@ -216,13 +218,12 @@ static esp_err_t pn532_i2c_write(void *ctx, const uint8_t *buf, size_t len)
             err = i2c_master_transmit(c->dev, buf, len, PN532_XFER_TIMEOUT_MS);
         }
 
-        /* Final escalation: the controller hardware state is stuck beyond
-         * i2c_master_bus_reset() (the FSM/bus-busy condition persists). Tear
-         * down and recreate the whole bus + device, then retry once. */
+        /* Final escalation: tear down and recreate the whole bus + device. */
         if (err == ESP_ERR_INVALID_STATE && rebuild_i2c_bus(c) == ESP_OK) {
             err = i2c_master_transmit(c->dev, buf, len, PN532_XFER_TIMEOUT_MS);
         }
     }
+    /* else: recovery itself failed to clear the bus — genuinely dead. */
 
     bus_unlock(c);
 
@@ -230,11 +231,16 @@ static esp_err_t pn532_i2c_write(void *ctx, const uint8_t *buf, size_t len)
         c->recovery_failures++;
         ESP_LOGE(TAG, "write failed even after bus recovery: %s",
                  esp_err_to_name(err));
-        /* Surface a distinct fatal error (rather than collapsing into
-         * ESP_ERR_TIMEOUT) so the app can distinguish "chip NACKed" from
-         * "controller wedged" and stop retrying. */
-        return (err == ESP_ERR_INVALID_STATE) ? ESP_ERR_INVALID_STATE
-                                              : ESP_ERR_TIMEOUT;
+        /* Report a FATAL ESP_ERR_INVALID_STATE once the limit is reached: the
+         * chip is unresponsive despite recovery (only a power cycle clears
+         * it). Until then return ESP_ERR_TIMEOUT so a transient condition
+         * (e.g. phone mid-teardown) can recover on the next attempt. */
+        if (c->recovery_failures >= PN532_RECOVERY_FAIL_LIMIT) {
+            ESP_LOGE(TAG, "chip unresponsive after %u recoveries; fatal",
+                     (unsigned)c->recovery_failures);
+            return ESP_ERR_INVALID_STATE;
+        }
+        return ESP_ERR_TIMEOUT;
     }
 
     c->recovery_failures = 0;

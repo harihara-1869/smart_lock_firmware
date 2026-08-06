@@ -60,7 +60,7 @@ Creates the full I2C transport in this order:
      torn down and re-added identically during bus recovery.
 6. **Configure + pulse RST** (if `rst_gpio >= 0`) — drives RST LOW for
    `PN532_RST_PULSE_MS` (50 ms), then HIGH, and waits `PN532_RST_SETTLE_MS`
-   (100 ms) for the oscillator. This guarantees a deterministic cold-boot state:
+   (250 ms) for the oscillator. This guarantees a deterministic cold-boot state:
    the PN532's RST is a GPIO output, NOT on the ESP32's EN rail, so a hard
    reset of the ESP32 never resets the chip. Pulsing here clears any wedged
    ISO-DEP state from a previous session and ensures the probe finds a live chip.
@@ -96,7 +96,7 @@ gpio_isr_handler_add(irq_gpio, pn532_irq_isr, ctx);
 | `PN532_XFER_TIMEOUT_MS` | 50 | Per-byte I2C transaction timeout |
 | `PN532_IRQ_ASSERTED_LEVEL` | 0 | IRQ is active-low |
 | `PN532_RST_PULSE_MS` | 50 | RST low-pulse duration at create / recovery |
-| `PN532_RST_SETTLE_MS` | 100 | Oscillator settle wait after RST release |
+| `PN532_RST_SETTLE_MS` | 250 | Oscillator settle wait after RST release |
 | `PN532_RECOVERY_THRESHOLD` | 3 | Consecutive failed recoveries before a fatal error |
 
 ## Bus Mutex

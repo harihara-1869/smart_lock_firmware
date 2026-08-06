@@ -149,8 +149,11 @@ void comm_module_start(void);
  *
  * Note: the comm task may also exit on its own if the transport reports a
  * fatal bus error (TRANSPORT_ERR_BUS_FATAL — the I2C bus/controller is wedged
- * beyond recovery). It logs once and deletes itself; the Application can
- * detect this and decide on recovery.
+ * beyond recovery) COMM_FATAL_RETRY_LIMIT consecutive times. A single fatal is
+ * retried (the session re-activates and waits for a reader again), so a
+ * transient wedge (e.g. a phone left on the pad) does not kill the task; only
+ * a persistently dead bus stops it. On exit it logs once and deletes itself;
+ * the Application can detect this and decide on recovery.
  */
 void comm_module_stop(void);
 

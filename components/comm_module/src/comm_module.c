@@ -106,6 +106,13 @@ static void comm_on_terminated(void *ctx)
 /* Comm task body                                                      */
 /* ------------------------------------------------------------------ */
 
+/* Number of consecutive fatal bus errors the comm task tolerates before
+ * giving up and deleting itself. A phone left on the pad can wedge the bus
+ * transiently (the recovery ladder clears it, but the session still aborts);
+ * a bounded retry lets the stack re-activate and wait for the phone to leave,
+ * while a genuinely dead bus still stops the task. */
+#define COMM_FATAL_RETRY_LIMIT 3
+
 static void comm_task_fn(void *arg)
 {
     (void)arg;
@@ -116,19 +123,33 @@ static void comm_task_fn(void *arg)
      * only after this task has already started running. */
     g_comm_task = xTaskGetCurrentTaskHandle();
 
+    unsigned fatal_retries = 0;
+
     while (!g_stop_requested) {
         transport_err_t err = transport_run_session(g_transport);
         if (err == TRANSPORT_ERR_BUS_FATAL) {
-            /* The I2C bus/controller is wedged beyond recovery. Stop the comm
-             * task (clear handle + self-delete below) instead of looping
-             * forever; the Application's supervision/watchdog can decide how
-             * to recover. */
-            ESP_LOGE(TAG, "comm task stopping: fatal bus error");
-            break;
+            fatal_retries++;
+            if (fatal_retries >= COMM_FATAL_RETRY_LIMIT) {
+                /* The I2C bus/controller is persistently wedged. Stop the comm
+                 * task (clear handle + self-delete below) instead of looping
+                 * forever; the Application's supervision/watchdog can decide
+                 * how to recover. */
+                ESP_LOGE(TAG, "comm task stopping: %u consecutive fatal bus errors",
+                         fatal_retries);
+                break;
+            }
+            /* Transient fatal (e.g. phone left on the pad): retry the session.
+             * The next transport_run_session re-activates and waits for a
+             * reader again. Give the stack a moment to settle. */
+            ESP_LOGW(TAG, "fatal bus error (%u/%u) — retrying session",
+                     fatal_retries, COMM_FATAL_RETRY_LIMIT);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        } else {
+            /* TRANSPORT_ERR_TIMEOUT (no reader) and TRANSPORT_OK (session ran
+             * to RELEASED) are both expected, steady-state outcomes — a normal
+             * cycle resets the fatal counter. */
+            fatal_retries = 0;
         }
-        /* TRANSPORT_ERR_TIMEOUT (no reader) and TRANSPORT_OK (session ran to
-         * RELEASED) are both expected, steady-state outcomes — loop
-         * immediately. */
     }
 
     g_comm_task = NULL;
