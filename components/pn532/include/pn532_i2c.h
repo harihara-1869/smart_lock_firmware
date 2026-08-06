@@ -38,6 +38,14 @@ extern "C" {
 #define PN532_I2C_DEFAULT_CLK_HZ  400000U
 
 /**
+ * @brief Cold-boot reset timing used by @ref pn532_i2c_create: RST is held LOW
+ * for this long, then released HIGH and the oscillator is given this long to
+ * stabilise before the bus probe.
+ */
+#define PN532_RST_PULSE_MS   50
+#define PN532_RST_SETTLE_MS  100
+
+/**
  * @brief I2C transport configuration.
  *
  * GPIO pins are owned by the application — this component does NOT hardcode or
@@ -60,6 +68,12 @@ typedef struct {
  * clock, configures the optional IRQ GPIO (with a GPIO ISR that gives a binary
  * semaphore), creates the bus mutex, and fills @p ops_out / @p ctx_out ready for
  * @ref pn532_init. If @p cfg->clk_speed is 0 the default 400 kHz is used.
+ *
+ * When @p cfg->rst_gpio is wired it is configured and PULSED (LOW for
+ * @ref PN532_RST_PULSE_MS then HIGH, waiting @ref PN532_RST_SETTLE_MS for the
+ * oscillator) BEFORE the bus probe, so the chip is in a deterministic
+ * cold-boot state and its oscillator has started before probing. Applications
+ * must NOT pre-release RST from main; this call owns it.
  *
  * @param[in]  cfg      Transport configuration (see @ref pn532_i2c_config_t).
  * @param[out] ops_out  Receives the transport vtable (copied by value; caller

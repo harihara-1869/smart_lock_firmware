@@ -856,13 +856,17 @@ implicit here.
 
 ### 8.5 Task model and its limitation
 
-The comm task's own loop is unchanged from the earlier draft — it just
-calls `transport_run_session` repeatedly:
+The comm task's own loop just calls `transport_run_session` repeatedly:
 
 ```c
 static void comm_task_fn(void *arg) {
     while (!g_stop_requested) {
-        transport_run_session(g_transport);
+        transport_err_t err = transport_run_session(g_transport);
+        if (err == TRANSPORT_ERR_BUS_FATAL) {
+            // I2C bus/controller wedged beyond recovery — stop instead of
+            // looping forever (the Application's supervision decides recovery).
+            break;
+        }
         // TRANSPORT_ERR_TIMEOUT (no reader) and TRANSPORT_OK (session ran to
         // RELEASED) are both expected, steady-state outcomes — loop immediately.
     }
@@ -870,6 +874,14 @@ static void comm_task_fn(void *arg) {
     vTaskDelete(NULL);
 }
 ```
+
+**Fatal bus error.** When the PN532 transport reports a bus/controller that is
+wedged beyond recovery (`TRANSPORT_ERR_BUS_FATAL`, surfaced from the driver's
+`ESP_ERR_INVALID_STATE` via LLI's `LLI_ERR_BUS_FATAL`), the comm task logs once
+and exits instead of retrying forever. Previously a wedged bus produced an
+infinite `TRANSPORT: activate failed: 6` loop. The Application task is NOT
+stopped — its integrity cadence and button ISR continue; a future watchdog/
+supervision layer decides whether to re-init or fault.
 
 `comm_module_stop` requests exit and blocks until the task clears — it does
 **not** interrupt a session mid-flight, only takes effect the next time the

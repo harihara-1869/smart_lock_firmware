@@ -62,7 +62,9 @@ typedef struct {
      * @param buf  Bytes to transmit (complete PN532 frame).
      * @param len  Number of bytes in @p buf.
      * @return ESP_OK on success; ESP_ERR_TIMEOUT if the chip never ACKs its
-     *         address; otherwise an esp_err_t from the underlying bus.
+     *         address (after internal recovery); ESP_ERR_INVALID_STATE if the
+     *         transport is wedged beyond recovery (the caller should stop
+     *         retrying); otherwise an esp_err_t from the underlying bus.
      */
     esp_err_t (*write)(void *ctx, const uint8_t *buf, size_t len);
 

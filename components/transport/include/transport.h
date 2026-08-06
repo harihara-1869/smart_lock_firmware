@@ -44,6 +44,10 @@ typedef enum {
     TRANSPORT_ERR_INVALID_APDU      = 4,
     TRANSPORT_ERR_PAYLOAD_TOO_LARGE = 5,
     TRANSPORT_ERR_INTERNAL          = 6,
+    /* The underlying bus/controller is wedged beyond recovery (LLI reported
+     * LLI_ERR_BUS_FATAL). transport_run_session returns this instead of
+     * looping; the caller should stop retrying and re-init. */
+    TRANSPORT_ERR_BUS_FATAL         = 7,
 } transport_err_t;
 
 typedef struct {

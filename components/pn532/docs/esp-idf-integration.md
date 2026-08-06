@@ -47,11 +47,12 @@ The driver uses ESP-IDF v5.x's **bus/device** I2C API (not the legacy `driver/i2
 | API | Where | Purpose |
 |-----|-------|---------|
 | `i2c_new_master_bus()` | `pn532_i2c_create` | Create I2C master bus with SDA/SCL pins, clock source |
-| `i2c_master_bus_add_device()` | `pn532_i2c_create` | Register PN532 at address 0x24 on the bus |
+| `i2c_master_bus_add_device()` | `pn532_i2c_create`, `rebuild_i2c_device` | Register PN532 at address 0x24 on the bus |
 | `i2c_master_probe()` | `pn532_i2c_create` | Verify PN532 is reachable; primes bus state machine |
 | `i2c_master_transmit()` | `pn532_i2c_write` | Send frame bytes (START → addr(W) → data → STOP) |
 | `i2c_master_receive()` | `pn532_i2c_read_status`, `pn532_i2c_read_frame` | Read bytes (START → addr(R) → data → STOP) |
-| `i2c_master_bus_rm_device()` | `pn532_i2c_destroy` | Remove device from bus |
+| `i2c_master_bus_reset()` | `recover_i2c_bus` | Resync the I2C master controller after bus recovery bit-banging |
+| `i2c_master_bus_rm_device()` | `pn532_i2c_destroy`, `rebuild_i2c_device` | Remove device from bus (teardown, or rebuild during recovery) |
 | `i2c_del_master_bus()` | `pn532_i2c_destroy` | Delete the I2C master bus |
 
 #### Bus Configuration

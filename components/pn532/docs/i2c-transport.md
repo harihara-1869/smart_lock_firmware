@@ -56,9 +56,18 @@ Creates the full I2C transport in this order:
    - `scl_speed_hz`: caller-specified or 400 kHz default
    - `scl_wait_us`: 50,000 (50ms clock-stretch tolerance)
    - `dev_addr_length`: `I2C_ADDR_BIT_LEN_7`
-6. **Probe** — `i2c_master_probe()` verifies the PN532 responds at 0x24. This also primes the I2C bus state machine (without it, the first `i2c_master_transmit` can fail with `ESP_ERR_INVALID_STATE`).
-7. **Setup IRQ** (if `irq_gpio >= 0`) — configures GPIO, installs ISR, adds handler
-8. **Return** — fills `ops_out` with the vtable, `ctx_out` with the context
+   - The device config is retained in the context so the device can be
+     torn down and re-added identically during bus recovery.
+6. **Configure + pulse RST** (if `rst_gpio >= 0`) — drives RST LOW for
+   `PN532_RST_PULSE_MS` (50 ms), then HIGH, and waits `PN532_RST_SETTLE_MS`
+   (100 ms) for the oscillator. This guarantees a deterministic cold-boot state:
+   the PN532's RST is a GPIO output, NOT on the ESP32's EN rail, so a hard
+   reset of the ESP32 never resets the chip. Pulsing here clears any wedged
+   ISO-DEP state from a previous session and ensures the probe finds a live chip.
+   Applications must NOT pre-release RST from `main` — this call owns it.
+7. **Probe** — `i2c_master_probe()` verifies the PN532 responds at 0x24. This also primes the I2C bus state machine (without it, the first `i2c_master_transmit` can fail with `ESP_ERR_INVALID_STATE`).
+8. **Setup IRQ** (if `irq_gpio >= 0`) — configures GPIO, installs ISR, adds handler
+9. **Return** — fills `ops_out` with the vtable, `ctx_out` with the context
 
 ### IRQ GPIO Setup (`setup_irq`)
 
@@ -86,6 +95,9 @@ gpio_isr_handler_add(irq_gpio, pn532_irq_isr, ctx);
 | `PN532_MUTEX_TIMEOUT_MS` | 5000 | Bus lock acquisition timeout |
 | `PN532_XFER_TIMEOUT_MS` | 50 | Per-byte I2C transaction timeout |
 | `PN532_IRQ_ASSERTED_LEVEL` | 0 | IRQ is active-low |
+| `PN532_RST_PULSE_MS` | 50 | RST low-pulse duration at create / recovery |
+| `PN532_RST_SETTLE_MS` | 100 | Oscillator settle wait after RST release |
+| `PN532_RECOVERY_THRESHOLD` | 3 | Consecutive failed recoveries before a fatal error |
 
 ## Bus Mutex
 
@@ -117,7 +129,11 @@ I2C transaction: START → addr(W) → frame bytes → STOP
 - Acquires bus mutex
 - Retries up to 5 times on failure (address NACK is common after prior exchanges)
 - 1ms backoff between retries
-- On exhaustion: returns `ESP_ERR_TIMEOUT` (not the raw bus error)
+- On exhaustion, attempts bus recovery (see below), then retries once more
+- If the controller is still wedged (`ESP_ERR_INVALID_STATE`), the I2C device
+  handle is recreated and retried once
+- Returns `ESP_ERR_INVALID_STATE` (fatal, after `PN532_RECOVERY_THRESHOLD`
+  consecutive failed recoveries) or `ESP_ERR_TIMEOUT` (transient NACK)
 
 **ESP-IDF API**: `i2c_master_transmit(dev, buf, len, timeout_ms)`
 
@@ -189,14 +205,23 @@ Asserts hardware reset on the PN532 by driving the RST GPIO pin.
 
 ## I2C Bus Recovery (`recover_i2c_bus`)
 
-Detects and recovers from a stuck I2C bus where the PN532 is holding SDA low (e.g. after a power glitch, partial transaction, or firmware hang).
+Recovers from a wedged I2C bus and/or a PN532 stuck in a broken ISO-DEP state.
+Two independent failures must be handled:
+
+1. The **physical bus** can be stuck with SDA held low (a slave mid-frame).
+2. The **ESP-IDF I2C master driver** can be left in a bad transaction state
+   (returns `ESP_ERR_INVALID_STATE`). Bit-banging the pins does NOT clear this;
+   only `i2c_master_bus_reset()` resyncs the controller.
+3. The **PN532** can be wedged in ISO-DEP even when SDA is free, so a hardware
+   reset is always required when `rst_gpio` is wired.
 
 ### Detection
 
 Before attempting recovery, checks if SDA is actually stuck low:
 1. Temporarily reconfigure SDA GPIO as input (no pull)
 2. Read level via `gpio_get_level()`
-3. If SDA is high, restore I2C function and return ESP_OK immediately — bus is not stuck
+3. If SDA is high, log a warning and continue anyway — the bus is free, but the
+   PN532 may still be wedged, so the full recovery below still runs.
 
 ### Recovery Sequence (NXP AN10609 / IEEE procedure)
 
@@ -207,16 +232,22 @@ If SDA is stuck low:
    - Check SDA after each rising edge
    - Stop early if SDA goes high (device released the bus)
 3. **Issue manual STOP condition**: SCL high, SDA low → SDA high
-4. **Restore both pins** to I2C peripheral function
+4. **Verify SDA is high**; if still low, fail
 
-### Post-Recovery
+### Post-Recovery (always runs)
 
-After successful recovery:
-- **If rst_gpio available**: call `pn532_i2c_reset_device(10, 100)` to reset PN532 firmware to clean state
-- **If no rst_gpio**: send wakeup sequence (0x55 bytes) and log a warning:
-  `"PN532: no reset pin — PN532 internal state may be undefined after recovery"`
+1. **`i2c_master_bus_reset(bus)`** — resyncs the ESP-IDF I2C master controller
+   so its transaction state matches the physical bus. This is the key step that
+   clears the permanent `ESP_ERR_INVALID_STATE` after bit-banging. The device
+   handle survives a bus reset.
+2. **Reset the PN532** — if `rst_gpio` is wired, `pn532_i2c_reset_device()`; if
+   unwired, send the wakeup sequence (0x55 bytes) and log a warning:
+   `"PN532: no reset pin — PN532 internal state may be undefined after recovery"`
 
-### Integration with Write Retry Loop
+The controller reset runs BEFORE the PN532 hardware reset so the chip never sees
+I2C traffic mid-recovery.
+
+### Escalation in `pn532_i2c_write`
 
 Bus recovery is called only after the full write retry budget is exhausted:
 
@@ -225,25 +256,28 @@ pn532_i2c_write():
   for attempt in 1..5:
     i2c_master_transmit() → if OK, return ESP_OK
     vTaskDelay(1ms)
-  
+
   // All retries exhausted
   ESP_LOGW("write failed after 5 retries, attempting bus recovery")
-  
-  // Check if SDA is stuck and attempt recovery
-  bus_lock()
-  recover_i2c_bus()
-  bus_unlock()
-  
-  // One final write attempt after recovery
-  bus_lock()
-  err = i2c_master_transmit()
-  bus_unlock()
-  
+
+  if recovery_failures >= PN532_RECOVERY_THRESHOLD:
+    return ESP_ERR_INVALID_STATE        // fatal — stop retrying
+
+  recover_i2c_bus()                      // reset controller + chip
+
+  err = i2c_master_transmit()            // retry once
+  if err == ESP_ERR_INVALID_STATE:
+    rebuild_i2c_device()                 // rm + re-add the device handle
+    err = i2c_master_transmit()          // retry once more
+
   if err != ESP_OK:
-    return ESP_ERR_TIMEOUT
+    recovery_failures++
+    return err == ESP_ERR_INVALID_STATE ? ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT
+
+  recovery_failures = 0                  // healthy transaction resets the counter
 ```
 
-**Note**: recovery is NOT called on every failed transaction — only after the full retry budget is exhausted.
+**Note**: recovery is NOT called on every failed transaction — only after the full retry budget is exhausted. Consecutive failures are capped by `PN532_RECOVERY_THRESHOLD` (3); beyond that the transport reports a fatal `ESP_ERR_INVALID_STATE` so the application can stop retrying instead of looping forever.
 
 ## Destruction (`pn532_i2c_destroy`)
 

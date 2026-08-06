@@ -1,4 +1,4 @@
-# PN532 NFC driver component (physical).
+# PN532 NFC driver component (physical/link layer only).
 #
 # NOTE: this component's directory is "driver", which is ALSO the name of an
 # ESP-IDF built-in component. A project component that shares a built-in name

@@ -117,7 +117,18 @@ static void comm_task_fn(void *arg)
     g_comm_task = xTaskGetCurrentTaskHandle();
 
     while (!g_stop_requested) {
-        transport_run_session(g_transport);
+        transport_err_t err = transport_run_session(g_transport);
+        if (err == TRANSPORT_ERR_BUS_FATAL) {
+            /* The I2C bus/controller is wedged beyond recovery. Stop the comm
+             * task (clear handle + self-delete below) instead of looping
+             * forever; the Application's supervision/watchdog can decide how
+             * to recover. */
+            ESP_LOGE(TAG, "comm task stopping: fatal bus error");
+            break;
+        }
+        /* TRANSPORT_ERR_TIMEOUT (no reader) and TRANSPORT_OK (session ran to
+         * RELEASED) are both expected, steady-state outcomes — loop
+         * immediately. */
     }
 
     g_comm_task = NULL;

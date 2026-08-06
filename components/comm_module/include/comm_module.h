@@ -146,6 +146,11 @@ void comm_module_start(void);
 /**
  * Request the comm task to exit at the top of its next loop iteration.
  * Does not interrupt a session mid-flight.
+ *
+ * Note: the comm task may also exit on its own if the transport reports a
+ * fatal bus error (TRANSPORT_ERR_BUS_FATAL — the I2C bus/controller is wedged
+ * beyond recovery). It logs once and deletes itself; the Application can
+ * detect this and decide on recovery.
  */
 void comm_module_stop(void);
 

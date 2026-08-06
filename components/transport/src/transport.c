@@ -106,6 +106,10 @@ static transport_err_t send_status(transport_handle_t h,
 {
     uint8_t buf[2] = {sw1, sw2};
     lli_err_t err = lli_send_apdu(h->lli, buf, sizeof(buf), timeout_ms);
+    if (err == LLI_ERR_BUS_FATAL) {
+        ESP_LOGE(TAG, "send_status fatal bus error");
+        return TRANSPORT_ERR_BUS_FATAL;
+    }
     if (err != LLI_OK) {
         ESP_LOGE(TAG, "send_status failed: %d", err);
         return TRANSPORT_ERR_INTERNAL;
@@ -129,6 +133,10 @@ static transport_err_t send_rapdu(transport_handle_t h,
     buf[len++] = rapdu->sw2;
 
     lli_err_t err = lli_send_apdu(h->lli, buf, len, timeout_ms);
+    if (err == LLI_ERR_BUS_FATAL) {
+        ESP_LOGE(TAG, "send_rapdu fatal bus error");
+        return TRANSPORT_ERR_BUS_FATAL;
+    }
     if (err != LLI_OK) {
         ESP_LOGE(TAG, "send_rapdu failed: %d", err);
         return TRANSPORT_ERR_INTERNAL;
@@ -194,6 +202,10 @@ static transport_err_t run_idle(transport_handle_t h)
         ESP_LOGD(TAG, "activate timeout");
         return TRANSPORT_ERR_TIMEOUT;
     }
+    if (err == LLI_ERR_BUS_FATAL) {
+        ESP_LOGE(TAG, "activate fatal bus error");
+        return TRANSPORT_ERR_BUS_FATAL;
+    }
     if (err != LLI_OK) {
         ESP_LOGE(TAG, "activate failed: %d", err);
         return TRANSPORT_ERR_INTERNAL;
@@ -210,6 +222,12 @@ static transport_err_t run_activated(transport_handle_t h)
 
     lli_err_t err = lli_receive_apdu(h->lli, raw, sizeof(raw),
                                      &raw_len, h->cfg.apdu_timeout_ms);
+    if (err == LLI_ERR_BUS_FATAL) {
+        /* A wedged bus is NOT a normal link drop — propagate so the session
+         * loop stops instead of erasing and retrying forever. */
+        ESP_LOGE(TAG, "activated receive fatal bus error");
+        return TRANSPORT_ERR_BUS_FATAL;
+    }
     if (err != LLI_OK) {
         ESP_LOGW(TAG, "activated receive failed: %d", err);
         invoke_erase(h);
@@ -290,6 +308,10 @@ static transport_err_t run_handshake(transport_handle_t h)
         size_t  raw_len = 0;
         lli_err_t err = lli_receive_apdu(h->lli, raw, sizeof(raw),
                                          &raw_len, remaining_ms);
+        if (err == LLI_ERR_BUS_FATAL) {
+            ESP_LOGE(TAG, "handshake receive fatal bus error");
+            return TRANSPORT_ERR_BUS_FATAL;
+        }
         if (err == LLI_ERR_LINK_RELEASED || err == LLI_ERR_TIMEOUT) {
             ESP_LOGW(TAG, "handshake receive lost: %d", err);
             invoke_erase(h);
@@ -358,6 +380,10 @@ static transport_err_t run_secure_session(transport_handle_t h)
         size_t  raw_len = 0;
         lli_err_t err = lli_receive_apdu(h->lli, raw, sizeof(raw),
                                          &raw_len, h->cfg.apdu_timeout_ms);
+        if (err == LLI_ERR_BUS_FATAL) {
+            ESP_LOGE(TAG, "secure receive fatal bus error");
+            return TRANSPORT_ERR_BUS_FATAL;
+        }
         if (err != LLI_OK) {
             ESP_LOGW(TAG, "secure receive failed: %d", err);
             invoke_erase(h);

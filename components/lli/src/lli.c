@@ -54,6 +54,23 @@ struct lli_t {
 /* ------------------------------------------------------------------ */
 
 /**
+ * @brief Map an esp_err_t from a pn532 transport/core call to an lli_err_t.
+ *
+ * The driver surfaces a distinct fatal ESP_ERR_INVALID_STATE when the I2C
+ * controller is wedged beyond recovery (see pn532.h write op doc). That must
+ * propagate as LLI_ERR_BUS_FATAL so upper layers stop retrying; every other
+ * failure falls back to @p fallback (the caller keeps its existing
+ * TIMEOUT/etc. special-cases).
+ */
+static lli_err_t lli_err_from_esp(esp_err_t err, lli_err_t fallback)
+{
+    if (err == ESP_ERR_INVALID_STATE) {
+        return LLI_ERR_BUS_FATAL;
+    }
+    return fallback;
+}
+
+/**
  * @brief Apply the PN532 configuration required for ISO-DEP card emulation.
  *
  * Safe to call repeatedly (idempotent). Re-applies configuration to recover
@@ -65,7 +82,7 @@ static lli_err_t configure_pn532(struct lli_t *h)
     esp_err_t err = pn532_sam_configuration(h->pn532, PN532_SAM_NORMAL, 0, true);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "pn532_sam_configuration failed: %s", esp_err_to_name(err));
-        return LLI_ERR_INTERNAL;
+        return lli_err_from_esp(err, LLI_ERR_INTERNAL);
     }
 
     /* Communication parameters — auto ATR_RES + ISO14443-4 PICC mode. */
@@ -74,7 +91,7 @@ static lli_err_t configure_pn532(struct lli_t *h)
                                PN532_PARAM_ISO14443_4_PICC);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "pn532_set_parameters failed: %s", esp_err_to_name(err));
-        return LLI_ERR_INTERNAL;
+        return lli_err_from_esp(err, LLI_ERR_INTERNAL);
     }
 
     return LLI_OK;
@@ -99,6 +116,10 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
         return LLI_ERR_INTERNAL;
     }
 
+    /* Configure-PN532 result, used by the cleanup path below (initialised so
+     * a goto that jumps over its assignment still reads a valid value). */
+    lli_err_t cfg_err = LLI_OK;
+
     /* Step 1 — create I2C transport. */
     pn532_i2c_config_t i2c_cfg = {
         .sda_gpio  = cfg->sda_gpio,
@@ -113,7 +134,7 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "pn532_i2c_create failed: %s", esp_err_to_name(err));
         free(h);
-        return LLI_ERR_INTERNAL;
+        return lli_err_from_esp(err, LLI_ERR_INTERNAL);
     }
 
     /* Step 2 — create core driver handle. */
@@ -127,7 +148,7 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
         ESP_LOGE(TAG, "pn532_init failed: %s", esp_err_to_name(err));
         pn532_i2c_destroy(h->i2c_ctx);
         free(h);
-        return LLI_ERR_INTERNAL;
+        return lli_err_from_esp(err, LLI_ERR_INTERNAL);
     }
 
     /* Step 3 — wake the chip. */
@@ -154,8 +175,8 @@ lli_err_t lli_init(const lli_config_t *cfg, lli_handle_t *handle_out)
              fw.ver, fw.rev, fw.ic, fw.support);
 
     /* Step 5 + 6 — configure PN532 for ISO-DEP card emulation. */
-    err = configure_pn532(h);
-    if (err != LLI_OK) {
+    cfg_err = configure_pn532(h);
+    if (cfg_err != LLI_OK) {
         goto cleanup_deinit;
     }
 
@@ -183,7 +204,11 @@ cleanup_deinit:
     pn532_deinit(h->pn532);
     pn532_i2c_destroy(h->i2c_ctx);
     free(h);
-    return LLI_ERR_INTERNAL;
+    if (cfg_err != LLI_OK) {
+        /* configure_pn532 already produced an lli_err_t (may be BUS_FATAL). */
+        return cfg_err;
+    }
+    return lli_err_from_esp(err, LLI_ERR_INTERNAL);
 }
 
 lli_err_t lli_deinit(lli_handle_t handle)
@@ -239,7 +264,7 @@ lli_err_t lli_activate(lli_handle_t handle, uint32_t timeout_ms)
     if (pn532_err != ESP_OK) {
         ESP_LOGE(TAG, "pn532_tg_init_as_target failed: %s",
                  esp_err_to_name(pn532_err));
-        return LLI_ERR_INTERNAL;
+        return lli_err_from_esp(pn532_err, LLI_ERR_INTERNAL);
     }
 
     return LLI_OK;
@@ -267,7 +292,8 @@ lli_err_t lli_receive_apdu(lli_handle_t handle, uint8_t *buf, size_t buf_len,
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TgGetData send failed: %s", esp_err_to_name(err));
         *len_out = 0;
-        return (err == ESP_ERR_TIMEOUT) ? LLI_ERR_TIMEOUT : LLI_ERR_INTERNAL;
+        return (err == ESP_ERR_TIMEOUT) ? LLI_ERR_TIMEOUT
+                                        : lli_err_from_esp(err, LLI_ERR_INTERNAL);
     }
 
     uint8_t resp[PN532_MAX_PAYLOAD_LEN];
@@ -281,7 +307,7 @@ lli_err_t lli_receive_apdu(lli_handle_t handle, uint8_t *buf, size_t buf_len,
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TgGetData receive failed: %s", esp_err_to_name(err));
         *len_out = 0;
-        return LLI_ERR_FRAME_INTEGRITY;
+        return lli_err_from_esp(err, LLI_ERR_FRAME_INTEGRITY);
     }
 
     /* Response layout: resp[0] = 0x87 (cmd), resp[1] = status, rest = data. */
@@ -332,7 +358,7 @@ lli_err_t lli_send_apdu(lli_handle_t handle, const uint8_t *data,
     esp_err_t err = pn532_tg_set_data(handle->pn532, data, len, timeout_ms);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "pn532_tg_set_data failed: %s", esp_err_to_name(err));
-        return LLI_ERR_SEND_FAILED;
+        return lli_err_from_esp(err, LLI_ERR_SEND_FAILED);
     }
 
     return LLI_OK;

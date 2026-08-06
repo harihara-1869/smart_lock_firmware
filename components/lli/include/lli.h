@@ -63,6 +63,9 @@ typedef enum {
     LLI_ERR_INVALID_ARG       = 5,
     LLI_ERR_INTERNAL          = 6,
     LLI_ERR_LINK_RELEASED     = 7,
+    /* Transport bus/controller wedged beyond recovery (PN532 driver surfaces
+     * ESP_ERR_INVALID_STATE). Upper layers must stop retrying and re-init. */
+    LLI_ERR_BUS_FATAL         = 8,
 } lli_err_t;
 
 typedef struct lli_t *lli_handle_t;
