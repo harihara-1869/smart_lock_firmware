@@ -13,9 +13,8 @@
 
 static const char *TAG = "TEST_INTEGRATION";
 
-/* Provided by smart_lock_firmware.c */
-extern const uint8_t TEST_LOCK_PUBLIC_KEY[32];
-extern const uint8_t TEST_LOCK_SECRET_KEY[64];
+/* Provided by smart_lock_firmware.c — phone identity only (lock identity is
+ * now generated on-device and read from key_store_identity_pk()). */
 extern const uint8_t TEST_PHONE_PUBLIC_KEY[32];
 extern const uint8_t TEST_PHONE_SECRET_KEY[64];
 
@@ -111,7 +110,7 @@ static void run_mock_phone_interaction(mock_phone_t *phone, bool is_provisioning
          *   success: 0x00 ‖ LOCK_PK(32)  (33 bytes)
          *   failure: 0x01                (1 byte)  */
         if (decrypted_len == 1 + 32 && decrypted[0] == APP_STATUS_OK
-            && memcmp(&decrypted[1], TEST_LOCK_PUBLIC_KEY, 32) == 0) {
+            && memcmp(&decrypted[1], key_store_identity_pk(), 32) == 0) {
             ESP_LOGI(TAG, "Provisioning Success! (lock PK echoed)");
         } else {
             ESP_LOGE(TAG, "Provisioning Failed! Application Response: %02x (len=%u)",
@@ -125,21 +124,21 @@ void test_integration_run(void *arg)
     ESP_LOGI(TAG, "--- Starting Integration Test ---");
     
     mock_phone_t phone;
-    mock_phone_init(&phone, TEST_PHONE_SECRET_KEY, TEST_LOCK_PUBLIC_KEY);
-    
+    mock_phone_init(&phone, TEST_PHONE_SECRET_KEY, key_store_identity_pk());
+
     /* Provisioning Flow */
     ESP_LOGI(TAG, "Arming provisioning window...");
     provision_mgr_arm(5000);
     lli_mock_trigger_activation();
-    
+
     run_mock_phone_interaction(&phone, true);
-    
+
     if (key_store_contains(TEST_PHONE_PUBLIC_KEY)) {
         ESP_LOGI(TAG, "Key successfully stored.");
     } else {
         ESP_LOGE(TAG, "Test failed: key NOT stored.");
     }
-    
+
     ESP_LOGI(TAG, "--- Integration Test Complete ---");
     vTaskDelete(NULL);
 }

@@ -124,8 +124,10 @@ size_t key_store_count(void);
  * and persists it to NVS. On subsequent boots: reads the persisted keypair
  * from NVS.
  *
- * Must be called once, after storage_hal_init (i.e. after key_store_init or
- * intent_log_init) and before any caller needs the identity bytes.
+ * Idempotent — subsequent calls return KEY_STORE_OK immediately. Must run
+ * after storage_hal_init (i.e. after key_store_init or intent_log_init) and
+ * before any caller needs the identity bytes (main calls it from
+ * init_storage(), before the comm config snapshots local_sk/local_pk).
  * The returned pointers are valid for the firmware lifetime.
  *
  * @return KEY_STORE_OK or KEY_STORE_ERR_STORAGE.

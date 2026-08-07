@@ -105,9 +105,14 @@ and persisted to NVS. It is loaded from NVS on every subsequent boot.
 
 ### Boot flow
 
+`key_store_identity_init()` is **idempotent** and runs from `init_storage()`
+in main — before `build_comm_config()` assembles the comm config, because
+`comm_module_init` (and the session beneath it) snapshots `local_sk`/`local_pk`
+at init time. `AppModule_Init()` calls it again as a no-op safety net.
+
 ```
-AppModule_Init()
-  └─ key_store_identity_init()
+init_storage() (main)            ← identity MUST exist before comm config
+  └─ key_store_identity_init()   ← AppModule_Init() re-calls (idempotent)
        ├─ storage_hal_read_blob("identity", "lock") → STORAGE_OK (96 bytes)
        │    → "identity loaded from NVS"
        │

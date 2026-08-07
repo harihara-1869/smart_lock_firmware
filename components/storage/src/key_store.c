@@ -242,6 +242,11 @@ static void generate_fresh_keypair(uint8_t sk[64], uint8_t pk[32])
 
 key_store_err_t key_store_identity_init(void)
 {
+    /* Idempotent: main's storage init and AppModule_Init both call this. */
+    if (s_identity_loaded) {
+        return KEY_STORE_OK;
+    }
+
     size_t len = IDENTITY_BLOB_LEN;
     uint8_t blob[IDENTITY_BLOB_LEN];
 
