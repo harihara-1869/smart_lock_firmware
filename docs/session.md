@@ -200,7 +200,7 @@ the swap point for a future ATECC608A backend:
 
 | Primitive | Implementation |
 |-----------|----------------|
-| Ed25519 sign/verify (RFC 8032) | Monocypher optional layer (`crypto_ed25519_*`), vendored in `src/third_party/` |
+| Ed25519 sign/verify (RFC 8032) | Monocypher optional layer (`crypto_ed25519_*`), provided by `components/monocypher` |
 | X25519 (RFC 7748) | Monocypher (`crypto_x25519`) with all-zero output rejection |
 | HKDF-SHA-256 (RFC 5869) | ~40 lines over mbedTLS `mbedtls_md_hmac` |
 | AES-256-GCM | mbedTLS `mbedtls/gcm.h` |

@@ -44,6 +44,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_random.h"
+#include "monocypher-ed25519.h"
 #include "storage_hal.h"
 
 static const char *TAG = "KEY_STORE";
@@ -216,4 +218,121 @@ bool key_store_contains(const uint8_t pk[32])
 size_t key_store_count(void)
 {
     return s_count;
+}
+
+/* ------------------------------------------------------------------ */
+/* Lock identity (first-boot keygen + NVS persistence)                 */
+/* ------------------------------------------------------------------ */
+
+#define IDENTITY_NS   "identity"
+#define IDENTITY_KEY  "lock"
+#define IDENTITY_BLOB_LEN 96   /* 64-byte SK || 32-byte PK */
+
+static uint8_t s_identity_sk[64];
+static uint8_t s_identity_pk[32];
+static bool    s_identity_loaded = false;
+
+static void generate_fresh_keypair(uint8_t sk[64], uint8_t pk[32])
+{
+    uint8_t seed[32];
+    esp_fill_random(seed, sizeof(seed));
+    crypto_ed25519_key_pair(sk, pk, seed);
+    /* seed is wiped by crypto_ed25519_key_pair internally (crypto_wipe). */
+}
+
+key_store_err_t key_store_identity_init(void)
+{
+    size_t len = IDENTITY_BLOB_LEN;
+    uint8_t blob[IDENTITY_BLOB_LEN];
+
+    storage_err_t serr = storage_hal_read_blob(IDENTITY_NS, IDENTITY_KEY,
+                                               blob, &len);
+    if (serr == STORAGE_OK && len == IDENTITY_BLOB_LEN) {
+        memcpy(s_identity_sk, blob, 64);
+        memcpy(s_identity_pk, blob + 64, 32);
+        s_identity_loaded = true;
+        ESP_LOGI(TAG, "identity loaded from NVS");
+        return KEY_STORE_OK;
+    }
+
+    /* Blob found but wrong size → corrupt NVS. Treat as a fatal error —
+     * generating a new keypair would orphan the old one (provisioned phones
+     * would permanently lose access). */
+    if (serr == STORAGE_OK) {
+        ESP_LOGE(TAG, "persisted identity blob wrong size (%u != %u);"
+                      " NVS may be corrupt — refusing to overwrite",
+                 (unsigned)len, (unsigned)IDENTITY_BLOB_LEN);
+        return KEY_STORE_ERR_STORAGE;
+    }
+
+    /* Identity not found. Check the sentinel to distinguish true first boot
+     * from a prior failure that left no persisted identity. */
+    if (serr == STORAGE_ERR_NOT_FOUND) {
+        bool is_first_boot = false;
+        size_t sb_len = 1;
+        uint8_t sentinel = 0;
+        storage_err_t sb_err = storage_hal_read_blob(
+                IDENTITY_NS, "booted", &sentinel, &sb_len);
+        if (sb_err == STORAGE_ERR_NOT_FOUND) {
+            is_first_boot = true;
+        }
+
+        if (!is_first_boot) {
+            ESP_LOGW(TAG, "device has booted before but identity is missing — "
+                          "NVS partition may have been erased. "
+                          "Proceeding as first boot.");
+        } else {
+            ESP_LOGI(TAG, "first boot detected — generating identity");
+        }
+
+        generate_fresh_keypair(s_identity_sk, s_identity_pk);
+
+        memcpy(blob, s_identity_sk, 64);
+        memcpy(blob + 64, s_identity_pk, 32);
+        serr = storage_hal_write_blob(IDENTITY_NS, IDENTITY_KEY,
+                                       blob, IDENTITY_BLOB_LEN);
+        if (serr != STORAGE_OK) {
+            ESP_LOGE(TAG, "failed to persist generated identity: %d", serr);
+            memset(s_identity_sk, 0, sizeof(s_identity_sk));
+            memset(s_identity_pk, 0, sizeof(s_identity_pk));
+            return KEY_STORE_ERR_STORAGE;
+        }
+        s_identity_loaded = true;
+        ESP_LOGI(TAG, "fresh identity generated and persisted");
+
+        /* Write a sentinel so the next boot can tell this was NOT the first
+         * boot — a missing identity on subsequent boots means corruption. */
+        if (is_first_boot) {
+            sentinel = 1;
+            storage_hal_write_blob(IDENTITY_NS, "booted", &sentinel, 1);
+
+            /* Fresh identity = new lock. Any stale provisioned phone keys
+             * from a previous NVS life belong to a different identity and
+             * are now useless — wipe them so the key store starts clean. */
+            ESP_LOGI(TAG, "first boot — clearing all provisioned phone keys");
+            for (uint8_t i = 0; i < KEY_MAX; i++) {
+                char name[4];
+                idx_key_name(i, name);
+                storage_hal_erase_key(HAL_NS, name);
+            }
+            memset(s_keys, 0, sizeof(s_keys));
+            s_count = 0;
+        }
+        return KEY_STORE_OK;
+    }
+
+    /* STORAGE_ERR_IO or STORAGE_ERR_FULL — NVS is unreachable or dead. */
+    ESP_LOGE(TAG, "identity init: NVS backend failure (err %d) — "
+                  "cannot load or generate identity", serr);
+    return KEY_STORE_ERR_STORAGE;
+}
+
+const uint8_t *key_store_identity_sk(void)
+{
+    return s_identity_sk;
+}
+
+const uint8_t *key_store_identity_pk(void)
+{
+    return s_identity_pk;
 }

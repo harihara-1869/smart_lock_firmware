@@ -25,8 +25,8 @@
 #include "mbedtls/md.h"
 #include "mbedtls/platform_util.h"
 
-#include "third_party/monocypher.h"
-#include "third_party/monocypher-ed25519.h"
+#include "monocypher.h"
+#include "monocypher-ed25519.h"
 
 void session_crypto_random(uint8_t *buf, size_t len)
 {

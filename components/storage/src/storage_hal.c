@@ -40,9 +40,11 @@ static const char *TAG = "STORAGE_NVS";
 
 #define NVS_NS_KEYS      "keys"
 #define NVS_NS_INTENT    "intent"
+#define NVS_NS_IDENTITY  "identity"
 
 static nvs_handle_t s_keys_h;
 static nvs_handle_t s_intent_h;
+static nvs_handle_t s_identity_h;
 static bool s_inited = false;
 
 storage_err_t storage_hal_init(void)
@@ -70,6 +72,14 @@ storage_err_t storage_hal_init(void)
         return STORAGE_ERR_IO;
     }
 
+    err = nvs_open(NVS_NS_IDENTITY, NVS_READWRITE, &s_identity_h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open(identity) failed: %s", esp_err_to_name(err));
+        nvs_close(s_keys_h);
+        nvs_close(s_intent_h);
+        return STORAGE_ERR_IO;
+    }
+
     s_inited = true;
     ESP_LOGI(TAG, "NVS storage backend ready");
     return STORAGE_OK;
@@ -77,8 +87,9 @@ storage_err_t storage_hal_init(void)
 
 static nvs_handle_t ns_to_handle(const char *ns)
 {
-    if (strcmp(ns, NVS_NS_KEYS) == 0)   return s_keys_h;
-    if (strcmp(ns, NVS_NS_INTENT) == 0) return s_intent_h;
+    if (strcmp(ns, NVS_NS_KEYS) == 0)     return s_keys_h;
+    if (strcmp(ns, NVS_NS_INTENT) == 0)   return s_intent_h;
+    if (strcmp(ns, NVS_NS_IDENTITY) == 0) return s_identity_h;
     return 0;
 }
 

@@ -115,6 +115,29 @@ bool key_store_contains(const uint8_t pk[32]);
  */
 size_t key_store_count(void);
 
+/* --- Lock identity ----------------------------------------------------- */
+
+/**
+ * Load or generate the lock's long-term Ed25519 identity.
+ *
+ * On first boot (no persisted key): generates a fresh keypair from CSPRNG
+ * and persists it to NVS. On subsequent boots: reads the persisted keypair
+ * from NVS.
+ *
+ * Must be called once, after storage_hal_init (i.e. after key_store_init or
+ * intent_log_init) and before any caller needs the identity bytes.
+ * The returned pointers are valid for the firmware lifetime.
+ *
+ * @return KEY_STORE_OK or KEY_STORE_ERR_STORAGE.
+ */
+key_store_err_t key_store_identity_init(void);
+
+/** @return pointer to the lock's 64-byte Ed25519 secret key. */
+const uint8_t *key_store_identity_sk(void);
+
+/** @return pointer to the lock's 32-byte Ed25519 public key. */
+const uint8_t *key_store_identity_pk(void);
+
 #ifdef __cplusplus
 }
 #endif

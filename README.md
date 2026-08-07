@@ -205,6 +205,7 @@ Comprehensive documentation for the system architecture, component specification
 | [session.md](docs/session.md) | Cryptographic primitives + provisioning cache. |
 | [transport.md](docs/transport.md) | APDU state machine, framing, teardown lifecycle. |
 | [lli.md](docs/lli.md) | LLI details, card emulation parameters, mock interface. |
+| [storage.md](docs/storage.md) | Storage architecture: RAM cache + write-through, key store, intent log, lock identity keygen, NVS namespaces. |
 | [Smart_Lock.pdf](docs/Smart_Lock.pdf) | Formal protocol specification. |
 
 ---
@@ -230,6 +231,23 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
+### ccache
+
+ESP-IDF uses [ccache](https://ccache.dev/) by default to speed up rebuilds. Stale cache entries can produce false build failures after structural changes (new files, renamed sources, Kconfig additions). If a build that should work fails with an error you cannot explain:
+
+```bash
+ccache -C -z                # zero statistics + clear cache
+rm -rf build sdkconfig
+idf.py set-target esp32s3  # regenerate fresh sdkconfig
+idf.py build
+```
+
+Alternatively, disable ccache for a single build:
+
+```bash
+CCACHE_DISABLE=1 idf.py build
+```
+
 ### Flashing & Monitoring
 
 Connect the ESP32-S3 via USB and run:
@@ -239,6 +257,25 @@ idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
 *(Replace `/dev/ttyUSB0` with your target serial port. Press `Ctrl+]` to exit monitor)*
+
+> **NVS survives `idf.py flash`.** Firmware updates write only the app
+> partition. The NVS partition — containing the lock's identity keypair,
+> provisioned phone keys, and actuation-intent log — is not erased. To force
+> a factory-reset state (new identity, wiped keys), erase the entire flash
+> first:
+>
+> ```bash
+> idf.py erase-flash
+> idf.py -p /dev/ttyUSB0 flash monitor
+> ```
+
+### Lock Identity
+
+On first boot the lock generates a fresh Ed25519 keypair from the ESP32's
+hardware TRNG, persists it to NVS, and clears any stale provisioned phone
+keys. On subsequent boots the identity is loaded from NVS — no keygen
+occurs. See [`docs/storage.md`](docs/storage.md) for the full identity
+lifecycle, the first-boot sentinel, and what happens when NVS is corrupt.
 
 ---
 
