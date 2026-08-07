@@ -243,7 +243,7 @@ Hardware/Link-Layer spec's five normative primitives exactly.
 typedef enum {
     LLI_OK = 0, LLI_ERR_TIMEOUT, LLI_ERR_FRAME_INTEGRITY, LLI_ERR_SEND_FAILED,
     LLI_ERR_NOT_SUPPORTED, LLI_ERR_INVALID_ARG, LLI_ERR_INTERNAL,
-    LLI_ERR_LINK_RELEASED,
+    LLI_ERR_LINK_RELEASED, LLI_ERR_BUS_FATAL,
 } lli_err_t;
 
 typedef enum { LLI_STATUS_ACTIVE, LLI_STATUS_RELEASED, LLI_STATUS_ERROR } lli_link_status_t;
@@ -268,6 +268,7 @@ Status-byte → taxonomy mapping (`lli_receive_apdu`, per `lli.md` §"lli_receiv
 | `0x00` | `LLI_OK` |
 | `0x01` (timeout) | `LLI_ERR_TIMEOUT` |
 | `0x29` (target released) | `LLI_ERR_LINK_RELEASED` |
+| `0x0B` (RF protocol — peer poll/teardown) | `LLI_ERR_LINK_RELEASED` |
 | anything else | `LLI_ERR_FRAME_INTEGRITY` (fail closed) |
 
 Link-status mapping (`lli_get_link_status`):

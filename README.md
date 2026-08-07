@@ -281,7 +281,7 @@ The actuator test needs no PN532, no display, no integrity hardware — just the
 
 The codebase includes an automated **Full Stack Integration Test Suite** that tests the entire protocol stack (Transport, Session, Comm Module, Provision Manager, Key Store) without requiring physical NFC hardware.
 
-Mocking is enabled by default via `add_compile_options(-DMOCK_LLI_FOR_TESTING=1)` in the root `CMakeLists.txt`. In mock mode the real PN532/I2C driver is compiled **out** — no NFC hardware is touched at all.
+Mocking is available via `add_compile_options(-DMOCK_LLI_FOR_TESTING=1)` in the root `CMakeLists.txt` — the line is commented out by default; uncomment it to enable. In mock mode the real PN532/I2C driver is compiled **out** — no NFC hardware is touched at all.
 
 ### Running the integration test
 

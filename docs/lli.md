@@ -124,6 +124,7 @@ Status byte mapping:
 | 0x00 | `LLI_OK` | Yes |
 | 0x01 | `LLI_ERR_TIMEOUT` | No |
 | 0x29 (TARGET_RELEASED) | `LLI_ERR_LINK_RELEASED` | No |
+| 0x0B (RF_PROTOCOL) | `LLI_ERR_LINK_RELEASED` | No |
 | Anything else | `LLI_ERR_FRAME_INTEGRITY` | No |
 
 On any non-OK return, `*len_out` is zeroed before the function returns.  The
@@ -262,6 +263,7 @@ does not need to keep the struct alive after init returns.
 | `LLI_ERR_INVALID_ARG` | 5 | NULL argument |
 | `LLI_ERR_INTERNAL` | 6 | Internal / transport error |
 | `LLI_ERR_LINK_RELEASED` | 7 | Reader departed mid-session |
+| `LLI_ERR_BUS_FATAL` | 8 | I2C bus/controller wedged beyond recovery |
 
 #### `lli_handle_t`
 

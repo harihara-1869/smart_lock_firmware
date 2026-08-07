@@ -87,8 +87,8 @@ To gate provisioning behind physical presence, the lock includes a dedicated eve
 ### 4.2 Kconfig Parameters
 | Parameter | Default | Purpose |
 |---|---|---|
-| `CONFIG_APP_PROVISION_BUTTON_GPIO` | `0` (`-1` = disabled) | GPIO pin for active-low provision button |
-| `CONFIG_APP_PROVISION_BUTTON_HOLD_MS` | `3000` | Minimum press-and-hold duration (ms) |
-| `CONFIG_APP_PROVISION_BUTTON_DEBOUNCE_MS` | `50` | Hardware ISR debounce interval (ms) |
+| `CONFIG_APP_PROVISION_BUTTON_GPIO` | `17` (`-1` = disabled) | GPIO pin for active-low provision button |
+| `CONFIG_APP_PROVISION_BUTTON_HOLD_MS` | `2000` | Minimum press-and-hold duration (ms) |
+| `CONFIG_APP_PROVISION_BUTTON_DEBOUNCE_MS` | `30` | Hardware ISR debounce interval (ms) |
 
 
