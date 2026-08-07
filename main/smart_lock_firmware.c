@@ -148,15 +148,15 @@ static comm_module_config_t build_comm_config(void)
 /* Peer init (dependency order)                                        */
 /* ------------------------------------------------------------------ */
 
-#if defined(CONFIG_TEST_MODE_FULL_APPLICATION) || defined(CONFIG_TEST_MODE_COMM_ONLY)
+#if defined(CONFIG_TEST_MODE_FULL_APPLICATION) || defined(CONFIG_TEST_MODE_COMM_ONLY) || defined(CONFIG_TEST_MODE_STORAGE_ONLY)
 static bool init_storage(void)
 {
-    if (KeyStore_Init() != KEY_STORE_OK) {
-        ESP_LOGE(TAG, "KeyStore_Init failed");
+    if (key_store_init() != KEY_STORE_OK) {
+        ESP_LOGE(TAG, "key_store_init failed");
         return false;
     }
-    if (IntentLog_Init() != INTENT_OK) {
-        ESP_LOGE(TAG, "IntentLog_Init failed");
+    if (intent_log_init() != INTENT_OK) {
+        ESP_LOGE(TAG, "intent_log_init failed");
         return false;
     }
     return true;
@@ -284,6 +284,150 @@ static void integrity_test_task(void *arg)
     }
 
     ESP_LOGI(TAG, "INTEGRITY_ONLY harness complete");
+    vTaskDelete(NULL);
+}
+
+#elif defined(CONFIG_TEST_MODE_STORAGE_ONLY)
+
+static void storage_test_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "STORAGE_ONLY harness started");
+
+    /* Init storage (warms caches from NVS). */
+    if (!init_storage()) {
+        ESP_LOGE(TAG, "storage init failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Add two test keys. */
+    const uint8_t k1[32] = {
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    };
+    const uint8_t k2[32] = {
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+    };
+
+    ESP_LOGI(TAG, "--- adding k1 ---");
+    if (key_store_add(k1) == KEY_STORE_OK) {
+        ESP_LOGI(TAG, "PASS: add k1");
+    } else {
+        ESP_LOGE(TAG, "FAIL: add k1 (maybe persisted from previous run?)");
+    }
+
+    ESP_LOGI(TAG, "--- adding k2 ---");
+    if (key_store_add(k2) == KEY_STORE_OK) {
+        ESP_LOGI(TAG, "PASS: add k2");
+    } else {
+        ESP_LOGE(TAG, "FAIL: add k2");
+    }
+
+    /* Assert count/get/contains. */
+    bool pass = true;
+    if (key_store_count() != 2) {
+        ESP_LOGE(TAG, "FAIL: count=%u", (unsigned)key_store_count());
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: count=2");
+    }
+
+    uint8_t out[32];
+    if (!key_store_get(0, out) || memcmp(out, k1, 32) != 0) {
+        ESP_LOGE(TAG, "FAIL: get(0) mismatch");
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: get(0)");
+    }
+    if (!key_store_get(1, out) || memcmp(out, k2, 32) != 0) {
+        ESP_LOGE(TAG, "FAIL: get(1) mismatch");
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: get(1)");
+    }
+    if (!key_store_contains(k1)) {
+        ESP_LOGE(TAG, "FAIL: contains(k1)");
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: contains(k1)");
+    }
+
+    /* Revoke k1. */
+    ESP_LOGI(TAG, "--- revoking k1 ---");
+    if (key_store_revoke(k1) != KEY_STORE_OK) {
+        ESP_LOGE(TAG, "FAIL: revoke(k1)");
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: revoke(k1)");
+    }
+    if (key_store_count() != 1) {
+        ESP_LOGE(TAG, "FAIL: count after revoke=%u", (unsigned)key_store_count());
+        pass = false;
+    }
+    if (key_store_contains(k1)) {
+        ESP_LOGE(TAG, "FAIL: contains(k1) after revoke");
+        pass = false;
+    }
+    if (!key_store_get(0, out) || memcmp(out, k2, 32) != 0) {
+        ESP_LOGE(TAG, "FAIL: get(0) after revoke — k2 should be at index 0");
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: after revoke, k2 now at index 0");
+    }
+
+    /* Intent log: write target, read back, clear. */
+    ESP_LOGI(TAG, "--- intent log ---");
+    if (intent_log_write(INTENT_TARGET_UNLOCKED) != INTENT_OK) {
+        ESP_LOGE(TAG, "FAIL: intent write");
+        pass = false;
+    }
+    intent_target_t it = intent_log_get_cached();
+    if (it != INTENT_TARGET_UNLOCKED) {
+        ESP_LOGE(TAG, "FAIL: intent readback=%d", (int)it);
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: intent write/read");
+    }
+    if (intent_log_write(INTENT_TARGET_NONE) != INTENT_OK) {
+        ESP_LOGE(TAG, "FAIL: intent clear");
+        pass = false;
+    }
+    if (intent_log_get_cached() != INTENT_TARGET_NONE) {
+        ESP_LOGE(TAG, "FAIL: intent still set after clear");
+        pass = false;
+    } else {
+        ESP_LOGI(TAG, "PASS: intent cleared");
+    }
+
+    /* Prove persistence: read k2 through the HAL directly. */
+    ESP_LOGI(TAG, "--- persistence check (via HAL) ---");
+    extern storage_err_t storage_hal_init(void);
+    extern storage_err_t storage_hal_read_blob(const char *, const char *,
+                                               void *, size_t *);
+    (void)storage_hal_init();
+    uint8_t raw[32];
+    size_t  raw_len = 32;
+    if (storage_hal_read_blob("keys", "k00", raw, &raw_len) == STORAGE_OK
+        && raw_len == 32 && memcmp(raw, k2, 32) == 0) {
+        ESP_LOGI(TAG, "PASS: persistence — k00==k2 (after revoke compacted)");
+    } else {
+        ESP_LOGE(TAG, "FAIL: persistence check");
+        pass = false;
+    }
+
+    if (pass) {
+        ESP_LOGI(TAG, "=== STORAGE_ONLY: ALL PASS ===");
+    } else {
+        ESP_LOGE(TAG, "=== STORAGE_ONLY: FAIL ===");
+    }
+
+    ESP_LOGI(TAG, "STORAGE_ONLY harness complete");
     vTaskDelete(NULL);
 }
 
@@ -446,6 +590,10 @@ void app_main(void)
         return;
     }
     xTaskCreate(integrity_test_task, "integrity_test", 4096, NULL, 5, NULL);
+    vTaskSuspend(NULL);
+#elif defined(CONFIG_TEST_MODE_STORAGE_ONLY)
+             "STORAGE_ONLY");
+    xTaskCreate(storage_test_task, "storage_test", 4096, NULL, 5, NULL);
     vTaskSuspend(NULL);
 #endif
 }

@@ -134,11 +134,11 @@ void provision_mgr_handle_cmd(const uint8_t *cmd_bytes, size_t len,
     }
 
     /* Step 3: commit the new identity to the key store. */
-    if (KeyStore_IsAuthorized(claimed_pk)) {
+    if (key_store_contains(claimed_pk)) {
         ESP_LOGW(TAG, "key already provisioned");
         resp_bytes[0] = APP_STATUS_KEY_EXISTS;
         *resp_len = 1;
-    } else if (KeyStore_AddKey(claimed_pk) != KEY_STORE_OK) {
+    } else if (key_store_add(claimed_pk) != KEY_STORE_OK) {
         ESP_LOGE(TAG, "failed to store key");
         resp_bytes[0] = APP_STATUS_INTERNAL;
         *resp_len = 1;

@@ -88,7 +88,7 @@ bool AppModule_GetPeerKeyByIndex(size_t index, uint8_t pubkey_out[32],
                                  void *provider_ctx)
 {
     (void)provider_ctx;
-    return KeyStore_GetByIndex(index, pubkey_out);
+    return key_store_get(index, pubkey_out);
 }
 
 const uint8_t *AppModule_GetLockPk(void)
@@ -120,7 +120,7 @@ static uint8_t current_lock_state(void)
 /* Write the actuation intent BEFORE driving the motor (§2.3). */
 static bool set_intent(intent_target_t target)
 {
-    return IntentLog_SetTarget(target) == INTENT_OK;
+    return intent_log_write(target) == INTENT_OK;
 }
 
 /* Kick off an async actuation toward @p target. */
@@ -142,7 +142,7 @@ static void start_actuation(intent_target_t target)
         ESP_LOGE(TAG, "AAI start failed: %d", err);
         s_last_error = APP_LAST_ERROR_MOTOR_FAULT;
         s_actuation_pending = false;
-        IntentLog_ClearTarget();
+        intent_log_write(INTENT_TARGET_NONE);
     }
 }
 
@@ -153,7 +153,7 @@ static void start_actuation(intent_target_t target)
 
 static void boot_recovery(void)
 {
-    intent_target_t intent = IntentLog_GetTarget();
+    intent_target_t intent = intent_log_get_cached();
     aai_state_t     phys   = AAI_GetStatus();
 
     ESP_LOGI(TAG, "boot recovery: physical=%d intent=%d",
@@ -161,7 +161,7 @@ static void boot_recovery(void)
 
     if (phys == AAI_STATE_LOCKED || phys == AAI_STATE_UNLOCKED) {
         /* Consistent; clear any stale intent. */
-        IntentLog_ClearTarget();
+        intent_log_write(INTENT_TARGET_NONE);
         return;
     }
 
@@ -171,7 +171,7 @@ static void boot_recovery(void)
         ESP_LOGE(TAG, "cannot resolve state %d automatically; lock fault",
                  (int)phys);
         s_last_error = APP_LAST_ERROR_MOTOR_STALL;
-        IntentLog_ClearTarget();
+        intent_log_write(INTENT_TARGET_NONE);
         return;
     }
 
@@ -208,7 +208,7 @@ static void boot_recovery(void)
         }
         vTaskDelay(pdMS_TO_TICKS(APP_ACTUATION_POLL_MS));
     }
-    IntentLog_ClearTarget();
+    intent_log_write(INTENT_TARGET_NONE);
 }
 
 /* ------------------------------------------------------------------ */
@@ -227,7 +227,7 @@ static void actuation_tick(void)
         ESP_LOGI(TAG, "actuation complete -> %s",
                  st == AAI_STATE_UNLOCKED ? "UNLOCKED" : "LOCKED");
         s_actuation_pending = false;
-        IntentLog_ClearTarget();
+        intent_log_write(INTENT_TARGET_NONE);
         Display_ShowIndication(DISPLAY_IND_SUCCESS);
         return;
     }
@@ -243,7 +243,7 @@ static void actuation_tick(void)
             AAI_Close();
         }
         s_actuation_pending = false;
-        IntentLog_ClearTarget();
+        intent_log_write(INTENT_TARGET_NONE);
         Display_ShowIndication(DISPLAY_IND_ERROR);
         return;
     }
@@ -371,7 +371,7 @@ static void app_task(void *arg)
                     if (cmd[0] == CMD_REVOKE_KEY && cmd_len == (1 + APP_KEY_LEN)
                         && resp_len >= 1 && resp[0] == APP_STATUS_OK) {
                         const uint8_t *target = &cmd[1];
-                        key_store_err_t kerr = KeyStore_RemoveKey(target);
+                        key_store_err_t kerr = key_store_revoke(target);
                         if (kerr == KEY_STORE_ERR_NOT_FOUND) {
                             resp[0] = APP_STATUS_NOT_FOUND;
                         } else if (kerr != KEY_STORE_OK) {

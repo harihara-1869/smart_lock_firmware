@@ -91,7 +91,7 @@ Comm stack detail:
 - **`actuator`**: Actuator Abstraction Interface (`aai.h`). Reports bolt position/stall facts; no policy. Backends: stub (default), RMT stepper, MCPWM DC — swapped via Kconfig.
 - **`display`**: All user-feedback peripherals (LEDs, buzzer, QR panel). Application decides WHAT/WHEN; Display owns HOW. Backends: console (default), e-paper panel.
 - **`integrity`**: Tamper/integrity sampling on a fixed cadence. Reports findings; policy stays in the Application. Backends: stub (default), tamper GPIO.
-- **`storage`**: Persistence **seam** — `key_store.h` / `intent_log.h` interfaces. RAM placeholder backend now; NVS / secure-element + write-policy backend planned behind the same interface.
+- **`storage`**: Persistence **seam** — `key_store.h` / `intent_log.h` interfaces. RAM cache + write-through persistence over a private HAL. NVS flash backend (default, power-loss safe); Secure Element stub planned.
 - **`test_utils`**: Mock phone client for integration testing.
 
 ---
@@ -244,7 +244,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ## Test Modes
 
-The firmware builds in **5 test modes**, selected by the `Smart Lock Test Mode` choice in `main/Kconfig.projbuild` (default `FULL_APPLICATION`). Each harness initializes ONLY the modules it needs; every mode must build.
+The firmware builds in **6 test modes**, selected by the `Smart Lock Test Mode` choice in `main/Kconfig.projbuild` (default `FULL_APPLICATION`). Each harness initializes ONLY the modules it needs; every mode must build.
 
 | Mode | Kconfig symbol | Initializes | What runs |
 |---|---|---|---|
@@ -253,6 +253,7 @@ The firmware builds in **5 test modes**, selected by the `Smart Lock Test Mode` 
 | Actuator Only | `CONFIG_TEST_MODE_ACTUATOR_ONLY` | actuator | `AAI_Open`/`AAI_Close`/`AAI_Stop` state machine |
 | Display Only | `CONFIG_TEST_MODE_DISPLAY_ONLY` | display | Indications, tones, QR render, clear |
 | Integrity Only | `CONFIG_TEST_MODE_INTEGRITY_ONLY` | integrity | Cadence checks, tamper status |
+| Storage Only | `CONFIG_TEST_MODE_STORAGE_ONLY` | storage | Key store + intent log with NVS persistence verified via HAL |
 
 ### Switching modes
 
@@ -262,18 +263,65 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-### Single-module harness example
+### What each mode tests
 
-To run the **Actuator Only** harness:
+| Mode | Hardware needed | What it exercises |
+|---|---|---|
+| **Full Application** | Bare ESP32-S3 board (mock LLI), or PN532 wired (real NFC) | Production path: dependency-order init, app task + comm task, mailbox dispatch, provisioning, actuation, integrity. With mock LLI runs the provisioning integration test. |
+| **Comm Only** | PN532 wired to GPIO 8/9/10/11 | NFC stack end-to-end: PN532 I2C → LLI → Transport → Session → Facade → echo/status loop |
+| **Actuator Only** | Bare ESP32-S3 board (stub), or motor + limit switches wired | `AAI_Open`/`AAI_Close`/`AAI_Stop` state machine via the stub backend |
+| **Display Only** | Bare ESP32-S3 board (console), or LEDs/buzzer/e-paper wired | Indications, tones, QR render, clear via the console backend |
+| **Integrity Only** | Bare ESP32-S3 board (stub), or tamper switch wired | Cadence checks, tamper status via the stub backend |
+| **Storage Only** | Bare ESP32-S3 board | Key store (add/get/contains/revoke) + intent log (write/read/clear) with real NVS persistence verified through the HAL. No motor, display, or NFC needed. |
 
+### Per-mode examples
+
+**Full Application** (default):
 ```bash
-idf.py menuconfig            # select "Actuator Only"
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+# Expected (mock LLI): provisioning integration test runs and reports PASS
+```
+
+**Storage Only** — test persistence with no hardware:
+```bash
+idf.py menuconfig            # Smart Lock Test Mode → Storage Only
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+# Expected: key store add/get/contains/revoke + intent log write/read/clear all PASS
+```
+
+**Comm Only** — exercise the real NFC stack:
+```bash
+idf.py menuconfig            # Smart Lock Test Mode → Communication Module Only
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+# Tap a phone; lock performs M1→M2→M3 handshake and echoes commands back
+```
+
+**Actuator Only** — exercise the motor state machine:
+```bash
+idf.py menuconfig            # Smart Lock Test Mode → Actuator Only
 idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 # monitor shows: AAI stub open/close cycles, simulated status transitions
 ```
 
-The actuator test needs no PN532, no display, no integrity hardware — just the board.
+**Display Only** — exercise indications and QR rendering:
+```bash
+idf.py menuconfig            # Smart Lock Test Mode → Display Only
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+# monitor shows: SUCCESS/ERROR/PROVISIONING indications, tone, QR render
+```
+
+**Integrity Only** — exercise the tamper cadence:
+```bash
+idf.py menuconfig            # Smart Lock Test Mode → Integrity Only
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+# monitor shows: cadence checks, tamper status
+```
 
 ---
 

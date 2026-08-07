@@ -134,7 +134,7 @@ void test_integration_run(void *arg)
     
     run_mock_phone_interaction(&phone, true);
     
-    if (KeyStore_IsAuthorized(TEST_PHONE_PUBLIC_KEY)) {
+    if (key_store_contains(TEST_PHONE_PUBLIC_KEY)) {
         ESP_LOGI(TAG, "Key successfully stored.");
     } else {
         ESP_LOGE(TAG, "Test failed: key NOT stored.");

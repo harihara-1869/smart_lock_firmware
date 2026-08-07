@@ -22,12 +22,15 @@
  *
  * Application_Module_Master.md §2.3 requires the Application to write the
  * TARGET_STATE intent to non-volatile storage BEFORE driving the motor, so a
- * power loss during actuation can be resolved at boot. Like key_store.h, this
- * is an interface; the backend is selected by STORAGE_BACKEND in Kconfig.
+ * power loss during actuation can be resolved at boot.
  *
- * The RAM placeholder has no persistence (honestly logged); a future NVS or
- * secure-element backend makes the intent survive reboot without changing any
- * application call site.
+ * Architecture:
+ *   - RAM cache warmed at boot; intent_log_get_cached() is RAM-only.
+ *   - intent_log_write() commits to the HAL FIRST (write-through), then mirrors
+ *     to RAM. A failed write leaves RAM untouched.
+ *   - mutating calls happen only on the Application task; the read path
+ *     (get_cached) is also only called on the Application task during boot
+ *     recovery, so no concurrency is needed.
  */
 
 #pragma once
@@ -50,31 +53,27 @@ typedef enum {
 } intent_err_t;
 
 /**
- * Initialise the intent log (backend-dependent; may be a no-op for RAM).
+ * Initialise the intent log: warm the RAM cache from the persistent backend.
  */
-intent_err_t IntentLog_Init(void);
+intent_err_t intent_log_init(void);
 
 /**
- * Record the target state BEFORE calling AAI_Open()/AAI_Close().
+ * Record a target state BEFORE calling AAI_Open()/AAI_Close().
+ * Write-through: HAL first, then RAM. Pass INTENT_TARGET_NONE to clear.
  *
  * @return INTENT_OK or INTENT_ERR_STORAGE (caller should abort actuation).
  */
-intent_err_t IntentLog_SetTarget(intent_target_t target);
+intent_err_t intent_log_write(intent_target_t target);
 
 /**
- * Read the last recorded target. Boot recovery uses this to decide which way
- * to resolve an intermediate bolt position.
+ * Read the last recorded target from the RAM cache. Boot recovery uses this
+ * to decide which way to resolve an intermediate bolt position.
+ *
+ * RAM-only — no HAL call.
  *
  * @return the last target, or INTENT_TARGET_NONE if none pending.
  */
-intent_target_t IntentLog_GetTarget(void);
-
-/**
- * Clear the intent once the physical state is confirmed to match.
- *
- * @return INTENT_OK or INTENT_ERR_STORAGE.
- */
-intent_err_t IntentLog_ClearTarget(void);
+intent_target_t intent_log_get_cached(void);
 
 #ifdef __cplusplus
 }

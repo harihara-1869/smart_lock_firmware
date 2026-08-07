@@ -32,6 +32,8 @@ Application.
 | Tamper switch (optional, -1) | Integrity | `integrity` | `CONFIG_INTEGRITY_PIN_TAMPER` |
 | Provision button | Application | `app_module` | Planned; debounced, Kconfig-configured (see §7) |
 | Battery ADC | Application | `app_module` | TODO(hardware): placeholder constant today |
+| NVS `keys` namespace | Storage | `storage` | Authorized-key persistence; backend owns NVS namespaces |
+| NVS `intent` namespace | Storage | `storage` | Actuation-intent persistence |
 
 **Rule:** every GPIO/pin/timer is declared in exactly one component's Kconfig.
 No module reads a pin that another module owns.
@@ -40,11 +42,35 @@ No module reads a pin that another module owns.
 
 | Namespace | Owner | Module | Status |
 |---|---|---|---|
-| (none yet) | Storage backend | `storage` | The RAM placeholder persists nothing. The planned NVS / secure-element backend owns all persistence namespaces (`keys`, `intent`, …) **inside the storage component only** |
+| `keys` | Storage backend | `storage` | Authorized-key persistence (k00..k63); NVS or SE backend |
+| `intent` | Storage backend | `storage` | Actuation-intent persistence (target key) |
 
 **Rule:** `nvs_flash` / `nvs.h` may appear **only** inside `components/storage`
 backend files. The Application and all peers call the semantic interfaces
 (`key_store.h`, `intent_log.h`) and never touch NVS directly.
+
+### 1.2a Storage architecture (cache + write-through)
+
+`storage` is a standalone ESP-IDF component and a **passive library**: no
+tasks, no timers, no ISRs, no queues, no business logic, no policy. It is
+NOT a peer module.
+
+- **RAM cache**: all reads (`key_store_get`, `key_store_contains`,
+  `key_store_count`, `intent_log_get_cached`) serve from RAM only. No
+  backend call on any read path — the cache is warmed at boot and kept in
+  sync by write-through.
+- **Write-through**: all writes (`key_store_add`, `key_store_revoke`,
+  `intent_log_write`) commit to the HAL (NVS or SE) FIRST, then mirror the
+  result to RAM. A failed HAL write leaves RAM untouched.
+- **Concurrency**: the `key_store_get` iterator may execute on the comm task
+  (via the provider trampoline during M3). Mutation happens only on the
+  Application task. Fill-slot-before-publish-count and
+  compact-before-shrink-count make the worst concurrent race a benign
+  one-time missed candidate — never an authorization bypass. No mutex.
+- **Cache warming**: on `key_store_init`, keys are read sequentially from
+  the HAL. An I/O error during warm-up causes a **loud failure** — a lock
+  that cannot read its key store must not boot with an empty cache (silent
+  owner lockout is worse than a boot failure).
 
 ### 1.3 Task ownership
 
@@ -111,14 +137,14 @@ Dependency order, implemented in `main/smart_lock_firmware.c`:
 ```
 app_main (FULL_APPLICATION mode)
   │
-  ├─ 1. Storage         KeyStore_Init() + IntentLog_Init()   (RAM placeholder)
+  ├─ 1. Storage         key_store_init() + intent_log_init()   (cache warm)
   ├─ 2. Display         Display_Init()
   ├─ 3. Actuator        AAI_Init()                           (stub → LOCKED)
   ├─ 4. Integrity       Integrity_Init()
   ├─ 5. Comm module     comm_module_init(&cfg)
   │                       cfg.peer_key_provider = AppModule_GetPeerKeyByIndex
   ├─ 6. Application     AppModule_Init(&cfg)
-  │                       └─ boot_recovery(): read IntentLog_GetTarget();
+  │                       └─ boot_recovery(): read intent_log_get_cached();
   │                          resolve intermediate bolt position
   ├─ 7. App task        AppModule_Start()
   │                       └─ app_task:
@@ -147,15 +173,15 @@ Phone sends CMD_UNLOCK (0x02)
 App: verifies authorization (session key in key store)
 App: replies 0x00 IMMEDIATELY (digital success)     ← phone disconnects
 App: (on its own schedule)
-     1. IntentLog_SetTarget(UNLOCKED)               ← BEFORE AAI_Open
+      1. intent_log_write(INTENT_TARGET_UNLOCKED)        ← BEFORE AAI_Open
      2. AAI_Open()                                  ← returns immediately
      3. poll AAI_GetStatus() every APP_ACTUATION_POLL_MS
-        - reaches UNLOCKED → IntentLog_ClearTarget(),
+        - reaches UNLOCKED → intent_log_write(INTENT_TARGET_NONE),
                             Display_ShowIndication(SUCCESS)
         - JAMMED/FAULT    → s_last_error = MOTOR_STALL,
                             AAI_Stop(); AAI_Close() (auto-reversal,
                             never leave bolt partially engaged),
-                            IntentLog_ClearTarget(),
+                             intent_log_write(INTENT_TARGET_NONE),
                             Display_ShowIndication(ERROR)
 ```
 
@@ -167,7 +193,7 @@ syncs with reality on the next connection.
 
 ```
 Boot:
-  intent = IntentLog_GetTarget()
+  intent = intent_log_get_cached()
   phys   = AAI_GetStatus()
   if phys is LOCKED or UNLOCKED:
       clear stale intent; proceed normally
@@ -217,12 +243,13 @@ default `FULL_APPLICATION`. Each harness initializes ONLY the modules it
 needs; every mode must build.
 
 | Mode | Symbol | Initializes | Exercises |
-|---|---|---|---|
+|---|---|---|---|---|
 | Full Application | `CONFIG_TEST_MODE_FULL_APPLICATION` | storage, display, actuator, integrity, comm, app | production path + (under `MOCK_LLI_FOR_TESTING`) the mock-phone provisioning integration test |
 | Comm Only | `CONFIG_TEST_MODE_COMM_ONLY` | storage, comm | echo/status loop over the real NFC stack |
 | Actuator Only | `CONFIG_TEST_MODE_ACTUATOR_ONLY` | actuator | `AAI_Open`/`AAI_Close`/`AAI_Stop` state machine |
 | Display Only | `CONFIG_TEST_MODE_DISPLAY_ONLY` | display | indications, tones, QR render, clear |
 | Integrity Only | `CONFIG_TEST_MODE_INTEGRITY_ONLY` | integrity | cadence checks, tamper status |
+| Storage Only | `CONFIG_TEST_MODE_STORAGE_ONLY` | storage | key store add/get/contains/revoke + intent log write/read/clear; persistence verified via HAL |
 
 ### How to run
 
@@ -252,7 +279,7 @@ interface change. The Application and peers compile unchanged.
 | Actuator | `aai.h` (`AAI_Init/Open/Close/Stop/GetStatus`) | `aai_backend_stub.c` (default) | Implement `aai_backend_rmt.c` (stepper) or `aai_backend_mcpwm.c` (DC) — drive the motor, read limit switches/stall pin, keep the same `aai_backend_ops_t` table. Select `CONFIG_ACTUATOR_BACKEND_RMT/MCPWM`. |
 | Display | `display.h` (indication/QR/tone/clear/text) | `display_backend_console.c` (default) | Implement `display_backend_panel.c` (SPI e-ink) and wire LEDs/buzzer; keep the same `display_backend_ops_t` table. Select `CONFIG_DISPLAY_BACKEND_PANEL`. |
 | Integrity | `integrity.h` (init/run_checks/status) | `integrity_backend_stub.c` (default) | Implement `integrity_backend_tamper_gpio.c` (debounced GPIO read); keep the same `integrity_backend_ops_t` table. Select `CONFIG_INTEGRITY_BACKEND_TAMPER_GPIO`. |
-| Storage | `key_store.h` / `intent_log.h` | `key_store_ram.c` / `intent_log_ram.c` (RAM, no persistence) | Implement the NVS backend and later the secure-element + RAM + write-policy backend behind the same interfaces. `KEY_STORE_ERR_STORAGE` / `INTENT_ERR_STORAGE` already express write-denied. Select `CONFIG_STORAGE_BACKEND_*`. |
+| Storage | `key_store.h` / `intent_log.h` | `key_store.c` / `intent_log.c` (write-through over HAL, default NVS backend) | Implement the `storage_hal_se.c` backend behind the same `storage_hal.h` interface. The HAL contract is `init`, `read_blob`, `write_blob`, `erase_key`. Select `CONFIG_STORAGE_BACKEND_SE`. |
 
 **Storage seam contract (deliberately loose):** the Application's call sites,
 opcode handlers, and `peer_key_provider` iterator depend only on

@@ -34,6 +34,9 @@ choice SMART_LOCK_TEST_MODE
     config TEST_MODE_INTEGRITY_ONLY
         bool "Integrity Only"
 
+    config TEST_MODE_STORAGE_ONLY
+        bool "Storage Only"
+
 endchoice
 
 endmenu
