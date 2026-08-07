@@ -25,6 +25,7 @@
  */
 
 #include "storage_hal.h"
+#include "sdkconfig.h"
 
 #if defined(CONFIG_STORAGE_BACKEND_NVS)
 
