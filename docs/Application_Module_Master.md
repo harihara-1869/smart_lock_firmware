@@ -91,4 +91,29 @@ To gate provisioning behind physical presence, the lock includes a dedicated eve
 | `CONFIG_APP_PROVISION_BUTTON_HOLD_MS` | `2000` | Minimum press-and-hold duration (ms) |
 | `CONFIG_APP_PROVISION_BUTTON_DEBOUNCE_MS` | `30` | Hardware ISR debounce interval (ms) |
 
+## 5. Production Cleanup (after all testing)
+
+The Application Module exposes two init functions — `AppModule_GetCommConfig()`
+(assembles the comm config, including the lock identity) and
+`AppModule_Init()` (caches the lock PK, runs boot recovery). This split exists
+so the `COMM_ONLY` test harness can assemble the config without pulling in
+actuator-dependent boot recovery.
+
+**For production (after all test modes are retired): merge the two functions
+into one**, e.g. `AppModule_InitAndGetCommConfig()`, that assembles the config,
+loads/generates the identity, runs boot recovery, and returns the finalized
+config. `main` then becomes:
+
+```c
+comm_module_config_t cfg = AppModule_InitAndGetCommConfig();
+comm_module_init(&cfg);   /* snapshots local_sk/local_pk — identity ready */
+```
+
+This makes the "config finalized before `comm_module_init`" ordering
+**structural** instead of commented, and removes the need for `main` to know
+the identity-init ordering at all. The merge is only deferred because
+`COMM_ONLY` needs config assembly without boot recovery — once the harnesses
+are gone, there is no reason to keep the two-step sequence.
+
+
 

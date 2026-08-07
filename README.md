@@ -20,7 +20,7 @@ The companion mobile application (iOS / Android) is developed in a separate repo
 | Actuator | Stepper / DC motor (planned) | RMT / MCPWM | Stub backend active (simulated) |
 | Display | E-Paper / E-Ink (Planned) | SPI (250x122) | Console ASCII QR fallback currently active |
 | Integrity | Tamper switch (planned) | GPIO | Stub backend active (simulated) |
-| Storage | NVS / secure element (planned) | — | RAM placeholder backend active |
+| Storage | NVS flash (default) / secure element (planned) | — | NVS backend active (power-loss safe); SE honest stub planned |
 
 ### Default GPIO Mapping
 
@@ -54,7 +54,7 @@ The codebase strictly enforces modular layer boundaries. Upper layers depend onl
 │  (frozen)   │   (AAI)      │              │                 │
 ├─────────────┴──────────────┴──────────────┴─────────────────┤
 │                        Storage (seam)                       │
-│       key_store.h / intent_log.h — RAM placeholder now      │
+│       key_store.h / intent_log.h — NVS flash backend now     │
 └─────────────────────────────────────────────────────────────┘
 
 Comm stack detail:
@@ -184,7 +184,7 @@ smart_lock_firmware/
 │   └── test_utils/                     # Mock phone client for integration testing
 └── main/
     ├── CMakeLists.txt
-    ├── Kconfig.projbuild               # Smart Lock Test Mode choice (5 modes)
+    ├── Kconfig.projbuild               # Smart Lock Test Mode choice (6 modes)
     ├── smart_lock_firmware.c           # Entry point: dependency-order init + test-mode branch
     ├── test_integration.c              # Mock-phone integration test (provisioning POST)
     └── test_integration.h
@@ -286,7 +286,7 @@ The firmware builds in **6 test modes**, selected by the `Smart Lock Test Mode` 
 | Mode | Kconfig symbol | Initializes | What runs |
 |---|---|---|---|
 | Full Application | `CONFIG_TEST_MODE_FULL_APPLICATION` | storage, display, actuator, integrity, comm, app | Production path + (under mock LLI) the mock-phone provisioning integration test |
-| Comm Only | `CONFIG_TEST_MODE_COMM_ONLY` | storage, comm | Echo/status loop over the real NFC stack (no NFC hardware needed) |
+| Comm Only | `CONFIG_TEST_MODE_COMM_ONLY` | storage, comm | Echo/status loop over the real NFC stack (needs PN532 wired) |
 | Actuator Only | `CONFIG_TEST_MODE_ACTUATOR_ONLY` | actuator | `AAI_Open`/`AAI_Close`/`AAI_Stop` state machine |
 | Display Only | `CONFIG_TEST_MODE_DISPLAY_ONLY` | display | Indications, tones, QR render, clear |
 | Integrity Only | `CONFIG_TEST_MODE_INTEGRITY_ONLY` | integrity | Cadence checks, tamper status |
@@ -381,7 +381,6 @@ TEST_INTEGRATION: --- Starting Integration Test ---
 TEST_INTEGRATION: Arming provisioning window...
 SESSION: M3: provisioning window used, authentication deferred
 TEST_INTEGRATION: Handshake successful!
-PROV_MGR: provisioning successful — key committed
 TEST_INTEGRATION: Provisioning Success! (lock PK echoed)
 TEST_INTEGRATION: Key successfully stored.
 TEST_INTEGRATION: --- Integration Test Complete ---

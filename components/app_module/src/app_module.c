@@ -65,8 +65,6 @@ static const char *TAG = "APP_MOD";
 /* Static state (single Application task owns all of it)               */
 /* ------------------------------------------------------------------ */
 
-static comm_module_config_t s_comm_cfg;
-
 /* The lock's long-term Ed25519 public key (32 bytes), copied from the comm
  * config at init. Used for the CMD_PROVISION success response. */
 static uint8_t s_lock_pk[APP_KEY_LEN];
@@ -420,9 +418,15 @@ comm_module_config_t AppModule_GetCommConfig(void)
     cfg.peer_key_provider       = AppModule_GetPeerKeyByIndex;
     cfg.peer_key_provider_ctx   = NULL;
 
-    /* Populate lock identity from the key store. Identity was loaded or
-     * generated during storage init (init_storage() in main runs before
-     * build_comm_config()); key_store_identity_init() is idempotent. */
+    /* Load/generate the lock identity BEFORE this config is snapshotted by
+     * comm_module_init — the session signs M2 with its copy of local_sk.
+     * If this fails, local_sk/local_pk stay zero and AppModule_Init's own
+     * (idempotent) call will report the failure. */
+    if (key_store_identity_init() != KEY_STORE_OK) {
+        ESP_LOGE(TAG, "identity init failed — lock identity unavailable");
+    }
+
+    /* Populate lock identity from the key store. */
     memcpy(cfg.local_sk, key_store_identity_sk(), 64);
     memcpy(cfg.local_pk, key_store_identity_pk(), 32);
 
@@ -435,16 +439,15 @@ app_module_err_t AppModule_Init(const comm_module_config_t *comm_cfg)
         return APP_MODULE_ERR_INVALID_ARG;
     }
 
-    /* Safety net: identity is normally initialised by main's storage init
-     * (before the comm config is assembled — comm/session snapshot
-     * local_sk/local_pk at comm_module_init time). This call is idempotent
-     * and guards any path that reaches AppModule_Init without it. */
+    /* Identity init (idempotent): normally already done by
+     * AppModule_GetCommConfig(), before comm_module_init snapshots
+     * local_sk/local_pk. This call is a safety net for any path that
+     * reaches AppModule_Init without assembling the comm config first. */
     if (key_store_identity_init() != KEY_STORE_OK) {
         ESP_LOGE(TAG, "identity init failed");
         return APP_MODULE_ERR_INIT;
     }
 
-    s_comm_cfg = *comm_cfg;
     /* Cache lock PK from the identity store, not from the (still-unpopulated)
      * comm_cfg. AppModule_GetCommConfig() fills local_pk afterward. */
     memcpy(s_lock_pk, key_store_identity_pk(), sizeof(s_lock_pk));

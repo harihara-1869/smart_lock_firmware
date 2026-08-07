@@ -142,13 +142,6 @@ static bool init_storage(void)
         ESP_LOGE(TAG, "intent_log_init failed");
         return false;
     }
-    /* Identity must exist before build_comm_config() copies it into the comm
-     * config — comm_module_init (and the session beneath it) snapshots
-     * local_sk/local_pk at init time. */
-    if (key_store_identity_init() != KEY_STORE_OK) {
-        ESP_LOGE(TAG, "key_store_identity_init failed");
-        return false;
-    }
     return true;
 }
 #endif

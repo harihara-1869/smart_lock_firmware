@@ -105,32 +105,37 @@ and persisted to NVS. It is loaded from NVS on every subsequent boot.
 
 ### Boot flow
 
-`key_store_identity_init()` is **idempotent** and runs from `init_storage()`
-in main — before `build_comm_config()` assembles the comm config, because
-`comm_module_init` (and the session beneath it) snapshots `local_sk`/`local_pk`
-at init time. `AppModule_Init()` calls it again as a no-op safety net.
+`key_store_identity_init()` is **idempotent** and owned by the Application
+Module: `AppModule_GetCommConfig()` runs it before the comm config is
+snapshotted by `comm_module_init` (the session signs M2 with its copy of
+`local_sk`). `AppModule_Init()` calls it again as a no-op safety net.
 
 ```
-init_storage() (main)            ← identity MUST exist before comm config
-  └─ key_store_identity_init()   ← AppModule_Init() re-calls (idempotent)
-       ├─ storage_hal_read_blob("identity", "lock") → STORAGE_OK (96 bytes)
-       │    → "identity loaded from NVS"
-       │
-       ├─ storage_hal_read_blob("identity", "lock") → STORAGE_ERR_NOT_FOUND
-       │    ├─ storage_hal_read_blob("identity", "booted") → NOT_FOUND
-       │    │    → TRUE FIRST BOOT
-       │    │    → generate fresh Ed25519 keypair from CSPRNG
-       │    │    → persist to NVS + write "booted" sentinel
-       │    │    → erase all stale phone keys from keys namespace
-       │    │
-       │    └─ storage_hal_read_blob("identity", "booted") → FOUND
-       │         → "device has booted before but identity is missing"
-       │         → NVS partition may have been erased — proceed as first boot
-       │
-       ├─ storage_hal_read_blob("identity", "lock") → STORAGE_OK (wrong size)
-       │    → "refusing to overwrite" — corrupt NVS, don't orphan provisioned phones
-       │
-       └─ any other error → fail loud
+build_comm_config() (main)
+  └─ AppModule_GetCommConfig()
+       └─ key_store_identity_init()   ← MUST run before comm_module_init
+            ├─ storage_hal_read_blob("identity", "lock") → STORAGE_OK (96 bytes)
+            │    → "identity loaded from NVS"
+            │
+            ├─ storage_hal_read_blob("identity", "lock") → STORAGE_ERR_NOT_FOUND
+            │    ├─ storage_hal_read_blob("identity", "booted") → NOT_FOUND
+            │    │    → TRUE FIRST BOOT
+            │    │    → generate fresh Ed25519 keypair from CSPRNG
+            │    │    → persist to NVS + write "booted" sentinel
+            │    │    → erase all stale phone keys from keys namespace
+            │    │
+            │    └─ storage_hal_read_blob("identity", "booted") → FOUND
+            │         → "device has booted before but identity is missing"
+            │         → NVS partition may have been erased — proceed as first boot
+            │
+            ├─ storage_hal_read_blob("identity", "lock") → STORAGE_OK (wrong size)
+            │    → "refusing to overwrite" — corrupt NVS, don't orphan provisioned phones
+            │
+            └─ any other error → fail loud
+
+       ...comm_module_init(&cfg)   ← snapshots local_sk / local_pk
+
+AppModule_Init(&cfg)              ← re-calls key_store_identity_init (no-op)
 ```
 
 ### Keygen
